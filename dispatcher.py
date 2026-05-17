@@ -217,13 +217,15 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
     # Define call_server outside loop to avoid redefinition, but it needs access to server_status_map
     # easier to keep it inside or pass map as arg. Let's pass map as arg or use closure here.
     
-    def call_server(url, job_id, carteirinha, carteirinha_id, status_map):
+    def call_server(url, job_id, carteirinha, carteirinha_id, rotina, params, status_map):
         try:
             payload = {
                 "job_id": job_id,
                 "carteirinha_id": carteirinha_id,
                 "carteirinha": carteirinha,
-                "paciente": "" 
+                "paciente": "",
+                "rotina": rotina or "",    # identifica qual scraper usar no server
+                "params": params or {},     # parâmetros específicos do convênio
             }
             # Log attempt
             try:
@@ -555,7 +557,18 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
                     import threading
                     # Fetch carteirinha
                     cart_obj = job.carteirinha_rel
-                    t = threading.Thread(target=call_server, args=(server_url, job.id, cart_obj.carteirinha, cart_obj.id, server_status_map))
+                    t = threading.Thread(
+                        target=call_server,
+                        args=(
+                            server_url,
+                            job.id,
+                            cart_obj.carteirinha,
+                            cart_obj.id,
+                            job.rotina or "",   # NOVO: tipo do job
+                            job.params or {},    # NOVO: parâmetros arbitrários
+                            server_status_map,
+                        )
+                    )
                     t.start()
                     
                     # Track thread for watchdog

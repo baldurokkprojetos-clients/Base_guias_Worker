@@ -33,13 +33,15 @@ class FileLogStream:
 # if sys.stderr is None: sys.stderr = FileLogStream("server_err.log")
 
 from ImportBaseGuias import UnimedScraper
+from clmf_scraper import CLMFScraper
 
 import threading
 import time
 from datetime import datetime, timedelta
 
 app = FastAPI()
-scraper = None
+unimed_scraper = None
+clmf_scraper = None
 last_activity_time = datetime.now()
 driver_lock = threading.Lock()
 INACTIVITY_LIMIT = timedelta(minutes=20)
@@ -83,16 +85,35 @@ threading.Thread(target=maintain_driver_lifecycle, daemon=True).start()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global scraper, last_activity_time
-    scraper = UnimedScraper()
-    # Initial Start
+    global unimed_scraper, clmf_scraper, last_activity_time
+
+    # --- Inicializar Unimed (comportamento legado) ---
+    unimed_scraper = UnimedScraper()
     with driver_lock:
-        scraper.start_driver()
-        scraper.login()
-        last_activity_time = datetime.now()
+        unimed_scraper.start_driver()
+        unimed_scraper.login()
+
+    # --- Inicializar CLMF ---
+    clmf_login = os.getenv("CLMF_LOGIN", "")
+    clmf_password = os.getenv("CLMF_PASSWORD", "")
+    clmf_headless = os.getenv("SGUCARD_HEADLESS", "true").lower() == "true"
+    clmf_scraper = CLMFScraper(
+        login=clmf_login,
+        senha=clmf_password,
+        headless=clmf_headless,
+    )
+    # Login CLMF é feito sob demanda (lazy) no primeiro job,
+    # para não bloquear a inicialização se as credenciais não estiverem configuradas.
+
+    last_activity_time = datetime.now()
     yield
+
+    # --- Cleanup ---
     with driver_lock:
-        scraper.close_driver()
+        if unimed_scraper:
+            unimed_scraper.close_driver()
+    if clmf_scraper and clmf_scraper.driver:
+        clmf_scraper.close_driver()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -101,6 +122,8 @@ class JobRequest(BaseModel):
     carteirinha_id: int
     carteirinha: str
     paciente: str = ""
+    rotina: str = ""    # identifica qual scraper usar; vazio = legado Unimed
+    params: dict = {}   # parâmetros arbitrários (CLMF e futuros convênios)
 
 
 @app.get("/")
@@ -129,77 +152,116 @@ def restart_driver():
 
 @app.post("/process_job")
 def process_job(job: JobRequest):
-    print(f">>> Received Job {job.job_id} for Carteirinha {job.carteirinha}")
-    global scraper, last_activity_time
-    
-    if not scraper:
-         raise HTTPException(status_code=503, detail="Scraper not initialized")
+    print(f">>> Received Job {job.job_id} | rotina='{job.rotina}' | carteirinha={job.carteirinha}")
+    global unimed_scraper, clmf_scraper, last_activity_time
 
-    with driver_lock:
-        # Check if driver is alive/open
-        if not scraper.driver:
-            print(">>> Driver is closed (timeout or crash). Restarting...")
-            try:
-                scraper.start_driver()
-                scraper.login()
-            except Exception as e:
-                return {"status": "error", "message": f"Failed to restart driver: {e}", "carteirinha_id": job.carteirinha_id}
-        
-        # Check if we should re-login? (Maybe blindly trust it works, if it fails scraping will catch)
-        # We assume if it was idle < 20 mins, it's fine. If > 20 mins it was closed.
-        
-        last_activity_time = datetime.now()
+    # ── Roteamento por rotina ──────────────────────────────────────────────
+    if job.rotina == "clmf_atualizar_rc":
+        return _process_job_clmf(job)
+    else:
+        return _process_job_unimed(job)
 
-    # Process
+
+def _process_job_clmf(job: JobRequest):
+    """Processa job do convênio CLMF via CLMFScraper."""
+    global clmf_scraper, last_activity_time
+
+    if not clmf_scraper:
+        raise HTTPException(status_code=503, detail="CLMFScraper não inicializado")
+
+    # Inicializar driver CLMF sob demanda (lazy)
+    if not clmf_scraper.driver:
+        print(">>> CLMFScraper: driver não inicializado. Iniciando...")
+        try:
+            clmf_scraper.start_driver()
+        except Exception as e:
+            return {"status": "error", "message": f"Falha ao iniciar driver CLMF: {e}",
+                    "carteirinha_id": job.carteirinha_id}
+
+    last_activity_time = datetime.now()
+
     try:
-        # Scraper methods might need to be thread-safe if we had parallel requests, 
-        # but here we likely have 1 request per worker at a time via dispatcher.
-        # But we holding lock? No, scraping takes time. We shouldn't hold lock during scraping
-        # if we want other status checks (health) to work, but for now single thread logic is safer.
-        # Ideally we release lock, but safeguard 'scraper' instance. 
-        # Since scraper.driver is shared, we should probably keep lock if scraping modifies driver state? 
-        # Selenium is not thread safe. So yes, hold lock or ensure serial execution.
-        
-        with driver_lock:
-             # Double check existence
-             if not scraper.driver:
-                  raise Exception("Driver died unexpectedly before scraping.")
-             
-             results = scraper.process_carteirinha(
-                job.carteirinha, 
-                job_id=job.job_id, 
-                carteirinha_db_id=job.carteirinha_id
-             )
-             last_activity_time = datetime.now()
-             print(f">>> Returning {len(results)} items for Job {job.job_id}")
-             
-        return {"status": "success", "data": results, "carteirinha_id": job.carteirinha_id}
+        result = clmf_scraper.atualizar_rc(job.params)
+        last_activity_time = datetime.now()
+        return {
+            "status": result.get("status", "error"),
+            "data": result,
+            "carteirinha_id": job.carteirinha_id,
+        }
     except Exception as e:
-        # Log critical failure to DB using a fresh session
         from database import SessionLocal
         from models import Log
-        db = SessionLocal()
+        _log_error(job.job_id, job.carteirinha_id, f"CLMF Server Crash: {e}")
+        # Reset driver em falha para não poluir próximo job
         try:
-            db.add(Log(job_id=job.job_id, carteirinha_id=job.carteirinha_id, level="ERROR", message=f"Server Crash: {str(e)}"))
-            db.commit()
-        except Exception as log_e:
-            print(f"Failed to log server crash: {log_e}")
-            try: db.rollback()
-            except: pass
-        finally:
-            db.close()
+            clmf_scraper.close_driver()
+        except Exception:
+            pass
+        return {"status": "error", "message": str(e), "carteirinha_id": job.carteirinha_id}
 
-        # CRITICAL: Reset driver state on failure to avoid "broken" sessions for next jobs
-        print(f">>> ERROR during job processing: {e}. Resetting driver for next attempt.")
+
+def _process_job_unimed(job: JobRequest):
+    """Processa job do convênio Unimed via UnimedScraper (legado)."""
+    global unimed_scraper, last_activity_time
+
+    if not unimed_scraper:
+        raise HTTPException(status_code=503, detail="Scraper não inicializado")
+
+    with driver_lock:
+        if not unimed_scraper.driver:
+            print(">>> Driver Unimed fechado. Reiniciando...")
+            try:
+                unimed_scraper.start_driver()
+                unimed_scraper.login()
+            except Exception as e:
+                return {"status": "error", "message": f"Failed to restart driver: {e}",
+                        "carteirinha_id": job.carteirinha_id}
+
+        last_activity_time = datetime.now()
+
+    try:
+        with driver_lock:
+            if not unimed_scraper.driver:
+                raise Exception("Driver morreu antes do scraping.")
+            results = unimed_scraper.process_carteirinha(
+                job.carteirinha,
+                job_id=job.job_id,
+                carteirinha_db_id=job.carteirinha_id,
+            )
+            last_activity_time = datetime.now()
+            print(f">>> Retornando {len(results)} itens para Job {job.job_id}")
+
+        return {"status": "success", "data": results, "carteirinha_id": job.carteirinha_id}
+    except Exception as e:
+        _log_error(job.job_id, job.carteirinha_id, f"Server Crash: {e}")
+        print(f">>> ERRO no job Unimed: {e}. Resetando driver.")
         with driver_lock:
             try:
-                if scraper:
-                    scraper.close_driver()
-                    scraper.driver = None
+                if unimed_scraper:
+                    unimed_scraper.close_driver()
+                    unimed_scraper.driver = None
                 kill_orphan_chrome_processes()
-            except: pass
-
+            except Exception:
+                pass
         return {"status": "error", "message": str(e), "carteirinha_id": job.carteirinha_id}
+
+
+def _log_error(job_id: int, carteirinha_id: int, message: str):
+    """Grava log de erro no banco de forma segura."""
+    from database import SessionLocal
+    from models import Log
+    db = SessionLocal()
+    try:
+        db.add(Log(job_id=job_id, carteirinha_id=carteirinha_id, level="ERROR", message=message))
+        db.commit()
+    except Exception as log_e:
+        print(f"Falha ao gravar log de erro: {log_e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        db.close()
 
 
 
