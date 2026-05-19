@@ -73,6 +73,13 @@ class UnimedScraper:
         chrome_options.add_argument("--disable-setuid-sandbox")
         chrome_options.add_argument("--incognito")
         chrome_options.add_argument("--no-first-run")
+        
+        # Desativar pop-up "Mude sua senha" do gerenciador de senhas do Google
+        chrome_options.add_experimental_option("prefs", {
+            "credentials_enable_service": False,
+            "profile.password_manager_enabled": False
+        })
+        
         if self.headless:
             chrome_options.add_argument("--headless")
         

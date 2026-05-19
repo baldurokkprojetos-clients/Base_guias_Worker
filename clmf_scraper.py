@@ -71,9 +71,17 @@ class CLMFScraper:
             options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-features=PasswordLeakDetection")
+        options.add_argument("--incognito")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
+        
+        # Desativar pop-up "Mude sua senha" do gerenciador de senhas do Google
+        options.add_experimental_option("prefs", {
+            "credentials_enable_service": False,
+            "profile.password_manager_enabled": False
+        })
+        
         options.add_argument("--window-size=1280,900")
 
         try:
@@ -207,11 +215,33 @@ class CLMFScraper:
         wait = WebDriverWait(self.driver, WAIT_TIMEOUT)
 
         try:
-            # PASSO 2 — Extrair nome do paciente
-            nome_el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "span.crumb")))
-            nome_paciente_raw = nome_el.text.strip()
+            # PASSO 2 — Extrair nome exato do paciente no portal (para montar a URL do PDF corretamente)
+            nome_paciente_raw = ""
+            try:
+                # Tenta extrair da label de Nome (mais seguro que os crumbs)
+                nome_el = self.driver.find_element(By.XPATH, "//span[contains(text(), 'Nome:')]/following-sibling::strong")
+                nome_paciente_raw = nome_el.text.strip()
+            except NoSuchElementException:
+                # Tenta pelo 5º crumb se a label falhar
+                try:
+                    crumbs = self.driver.find_elements(By.CSS_SELECTOR, "span.crumb")
+                    # O nome costuma ser o texto solto após o último crumb '/' no header
+                    # Usamos regex na page_source como fallback absoluto
+                    match = re.search(r'<span class="legend">Nome:</span>\s*<strong>(.*?)</strong>', self.driver.page_source, re.IGNORECASE)
+                    if match:
+                        nome_paciente_raw = match.group(1).strip()
+                except Exception:
+                    pass
+            
+            # Fallback seguro caso a extração DOM falhe completamente
+            if not nome_paciente_raw:
+                nome_paciente_raw = params.get("paciente", "").strip()
+                logger.warning(f"  → Não foi possível extrair nome do DOM, usando fallback do DB: '{nome_paciente_raw}'")
+
+            # Garantir que removemos espaços duplos e trailing spaces
+            nome_paciente_raw = " ".join(nome_paciente_raw.split())
             nome_paciente_encoded = quote(nome_paciente_raw, safe="")
-            logger.info(f"  → nome_paciente: '{nome_paciente_raw}' → '{nome_paciente_encoded}'")
+            logger.info(f"  → nome_paciente_portal: '{nome_paciente_raw}' → '{nome_paciente_encoded}'")
 
             # PASSO 2b — Extrair carteirinha limpa (remove espaços, pontos e traços)
             carteirinha_el = self.driver.find_element(By.ID, "amil_client_carteirinha")
@@ -222,20 +252,57 @@ class CLMFScraper:
             # PASSO 2c — Extrair justificativa
             justificativa = ""
             try:
-                justificativa_el = self.driver.find_element(
-                    By.ID, "ipasgo_justificativa_periodo_tratamento"
-                )
-                justificativa = justificativa_el.text.strip()
-            except NoSuchElementException:
-                logger.warning("  → Campo justificativa não encontrado — usando vazio.")
+                justificativa = self.driver.execute_script("return document.getElementById('ipasgo_justificativa_periodo_tratamento').value;")
+                if not justificativa:
+                    justificativa = self.driver.execute_script("return document.getElementById('ipasgo_justificativa_periodo_tratamento').textContent;")
+            except Exception:
+                pass
+            if not justificativa:
+                match = re.search(r'<textarea[^>]*id=["\']ipasgo_justificativa_periodo_tratamento["\'][^>]*>(.*?)</textarea>', self.driver.page_source, re.IGNORECASE | re.DOTALL)
+                if match:
+                    justificativa = match.group(1)
+            justificativa = (justificativa or "").strip()
+
+            if not justificativa:
+                logger.warning("  → Campo justificativa não encontrado ou vazio no DOM.")
 
             # PASSO 2d — Extrair evolução
             evolucao_ipasgo = ""
             try:
-                evolucao_el = self.driver.find_element(By.ID, "ipasgo_evolucao_paciente")
-                evolucao_ipasgo = evolucao_el.text.strip()
-            except NoSuchElementException:
-                logger.warning("  → Campo evolucao_ipasgo não encontrado — usando vazio.")
+                evolucao_ipasgo = self.driver.execute_script("return document.getElementById('ipasgo_evolucao_paciente').value;")
+                if not evolucao_ipasgo:
+                    evolucao_ipasgo = self.driver.execute_script("return document.getElementById('ipasgo_evolucao_paciente').textContent;")
+            except Exception:
+                pass
+            if not evolucao_ipasgo:
+                match = re.search(r'<textarea[^>]*id=["\']ipasgo_evolucao_paciente["\'][^>]*>(.*?)</textarea>', self.driver.page_source, re.IGNORECASE | re.DOTALL)
+                if match:
+                    evolucao_ipasgo = match.group(1)
+            evolucao_ipasgo = (evolucao_ipasgo or "").strip()
+
+            if not evolucao_ipasgo:
+                logger.warning("  → Campo evolucao_ipasgo não encontrado ou vazio no DOM.")
+
+            # PASSO 2e — Extrair ipasgo_id (id interno do registro de RC)
+            ipasgo_id = "2"
+            try:
+                # Tenta várias formas que o portal pode estar renderizando o ID interno
+                extracted_id = self.driver.execute_script(
+                    "return document.querySelector('input[name=\"arr_relatorio[0][ipasgo_id]\"]')?.value || "
+                    "document.getElementById('ipasgo_id')?.value || "
+                    "document.querySelector('input[name=\"ipasgo_id\"]')?.value;"
+                )
+                if extracted_id:
+                    ipasgo_id = str(extracted_id).strip()
+            except Exception:
+                pass
+            logger.info(f"  → ipasgo_id extraído: {ipasgo_id}")
+
+            # Proteção contra wipe-out
+            if not justificativa and not evolucao_ipasgo:
+                msg = "Atenção: Justificativa e Evolução estão VAZIAS no portal. Abortando POST para não sobrescrever com vazio."
+                logger.error(f"  → {msg}")
+                return {"status": "error", "message": msg}
 
         except TimeoutException:
             msg = f"Timeout ao carregar prontuário do paciente {id_paciente}"
@@ -247,7 +314,7 @@ class CLMFScraper:
             return {"status": "error", "message": msg}
 
         # PASSO 3 — POST AJAX para gravar RC
-        logger.info("  → Enviando POST AJAX para gravar RC...")
+        logger.info(f"  → Enviando POST AJAX para gravar RC...")
         ajax_result = self._post_gravar_rc(
             id_paciente=id_paciente,
             id_profissional=id_profissional,
@@ -255,17 +322,24 @@ class CLMFScraper:
             justificativa=justificativa,
             evolucao_ipasgo=evolucao_ipasgo,
             data_rc_iso=data_rc_iso,
+            ipasgo_id=ipasgo_id,
         )
         if ajax_result.get("status") == "error":
             return ajax_result
 
-        # PASSO 4 — Montar URL do PDF
-        pdf_url = PDF_URL_TEMPLATE.format(
-            carteirinha=carteirinha_clean,
-            nome_paciente=nome_paciente_encoded,
-            AbrevEsp=abrev_esp,
-        )
-        logger.info(f"  → PDF URL: {pdf_url}")
+        # PASSO 4 — Gerar PDF fisicamente e capturar o caminho real
+        logger.info(f"  → Enviando POST AJAX para gerar o Relatório PDF...")
+        gerar_result = self._post_gerar_pdf(ipasgo_id=ipasgo_id)
+        if gerar_result.get("status") == "error":
+            return gerar_result
+            
+        caminho_sufix = gerar_result.get("caminho", "")
+        # A API pode retornar com espaços, que precisam ser url-encoded no GET.
+        # Substitui espaços por %20, mas preserva a barra e os query parameters.
+        caminho_sufix_encoded = caminho_sufix.replace(" ", "%20")
+        pdf_url = BASE_URL + caminho_sufix_encoded
+        
+        logger.info(f"  → PDF URL (Retornada pelo backend): {pdf_url}")
 
         # PASSO 5 — Baixar PDF
         download_result = self._download_pdf(pdf_url, caminho_pasta, nome_padrao)
@@ -289,9 +363,9 @@ class CLMFScraper:
         justificativa: str,
         evolucao_ipasgo: str,
         data_rc_iso: str,
+        ipasgo_id: str,
     ) -> dict:
         """Envia o formulário AJAX de gravação do RC via requests (usando cookies da sessão Selenium)."""
-        # Sincronizar cookies do Selenium para a sessão requests
         session = requests.Session()
         for name, value in self._session_cookies.items():
             session.cookies.set(name, value)
@@ -299,7 +373,7 @@ class CLMFScraper:
         payload = {
             "callback": "RelatorioMensalIpasgo",
             "callback_action": "gravar",
-            "arr_relatorio[0][ipasgo_id]": "2",
+            "arr_relatorio[0][ipasgo_id]": ipasgo_id,
             "arr_relatorio[0][ipasgo_profissional_atendimento]": id_especialidade,
             "arr_relatorio[0][ipasgo_justificativa_periodo_tratamento]": justificativa,
             "arr_relatorio[0][ipasgo_evolucao_paciente]": evolucao_ipasgo,
@@ -308,13 +382,52 @@ class CLMFScraper:
             "arr_relatorio[0][user_id]": id_profissional,
         }
 
+        # Converte explicitamente para URL Encoded string e loga para debug conforme pedido
+        encoded_payload = urlencode(payload)
+        logger.info(f"  [DEBUG URL ENCODED PAYLOAD] URL: {AJAX_RC_URL}")
+        logger.info(f"  [DEBUG URL ENCODED PAYLOAD] DATA: {encoded_payload}")
+
         try:
-            resp = session.post(AJAX_RC_URL, data=payload, timeout=30)
+            headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"}
+            resp = session.post(AJAX_RC_URL, data=encoded_payload, headers=headers, timeout=30)
             resp.raise_for_status()
             logger.info(f"  → AJAX RC response status: {resp.status_code}")
             return {"status": "success", "http_status": resp.status_code}
         except requests.RequestException as e:
             msg = f"Falha no POST AJAX do RC: {e}"
+            logger.error(f"  → {msg}")
+            return {"status": "error", "message": msg}
+
+    def _post_gerar_pdf(self, ipasgo_id: str) -> dict:
+        """Envia requisição AJAX para compilar e gerar o PDF atualizado no servidor."""
+        session = requests.Session()
+        for name, value in self._session_cookies.items():
+            session.cookies.set(name, value)
+
+        payload = {
+            "callback": "RelatorioMensalIpasgo",
+            "callback_action": "gerarRelatorio",
+            "ipasgo_id": ipasgo_id
+        }
+        
+        encoded_payload = urlencode(payload)
+        logger.info(f"  [DEBUG URL ENCODED GERAR PDF] DATA: {encoded_payload}")
+
+        try:
+            headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"}
+            resp = session.post(AJAX_RC_URL, data=encoded_payload, headers=headers, timeout=30)
+            resp.raise_for_status()
+            
+            resp_text = resp.text
+            logger.info(f"  → AJAX Gerar PDF response: {resp_text}")
+            
+            data = resp.json()
+            if "caminho" in data:
+                return {"status": "success", "caminho": data["caminho"]}
+            else:
+                return {"status": "error", "message": f"Resposta sem 'caminho': {resp_text}"}
+        except Exception as e:
+            msg = f"Falha ao gerar o PDF no servidor: {e}"
             logger.error(f"  → {msg}")
             return {"status": "error", "message": msg}
 
