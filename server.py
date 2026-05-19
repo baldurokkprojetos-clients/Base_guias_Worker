@@ -65,19 +65,32 @@ def kill_orphan_chrome_processes():
 
 
 def maintain_driver_lifecycle():
-    global scraper, last_activity_time
+    global unimed_scraper, clmf_scraper, last_activity_time
     while True:
         time.sleep(60) # Check every minute
         with driver_lock:
-            if scraper and scraper.driver:
-                if datetime.now() - last_activity_time > INACTIVITY_LIMIT:
-                    print(">>> Inactivity limit reached. Closing driver and killing chrome processes.")
+            # Cleanup both scrapers if inactive
+            if datetime.now() - last_activity_time > INACTIVITY_LIMIT:
+                killed_any = False
+                if unimed_scraper and unimed_scraper.driver:
+                    print(">>> Inactivity limit reached. Closing Unimed driver.")
                     try:
-                        scraper.close_driver()
-                        scraper.driver = None # Mark as closed
+                        unimed_scraper.close_driver()
+                        unimed_scraper.driver = None
+                        killed_any = True
                     except Exception as e:
-                        print(f"Error closing driver: {e}")
-                    # Kill ALL orphan chrome/chromedriver processes
+                        print(f"Error closing Unimed driver: {e}")
+                
+                if clmf_scraper and clmf_scraper.driver:
+                    print(">>> Inactivity limit reached. Closing CLMF driver.")
+                    try:
+                        clmf_scraper.close_driver()
+                        clmf_scraper.driver = None
+                        killed_any = True
+                    except Exception as e:
+                        print(f"Error closing CLMF driver: {e}")
+                
+                if killed_any:
                     kill_orphan_chrome_processes()
 
 # Start background thread
@@ -87,11 +100,10 @@ threading.Thread(target=maintain_driver_lifecycle, daemon=True).start()
 async def lifespan(app: FastAPI):
     global unimed_scraper, clmf_scraper, last_activity_time
 
-    # --- Inicializar Unimed (comportamento legado) ---
+    # --- Inicializar Unimed (comportamento legado modificado para lazy) ---
     unimed_scraper = UnimedScraper()
-    with driver_lock:
-        unimed_scraper.start_driver()
-        unimed_scraper.login()
+    # Driver e login agora só são iniciados no primeiro job que solicitar, 
+    # igual ao CLMF, para evitar abrir janelas desnecessárias no startup.
 
     # --- Inicializar CLMF ---
     clmf_login = os.getenv("CLMF_LOGIN", "")
@@ -129,26 +141,35 @@ class JobRequest(BaseModel):
 @app.get("/")
 async def health_check():
     is_busy = driver_lock.locked()
-    return {"status": "ok", "busy": is_busy, "driver_alive": (scraper is not None and scraper.driver is not None)}
+    unimed_alive = (unimed_scraper is not None and unimed_scraper.driver is not None)
+    clmf_alive = (clmf_scraper is not None and clmf_scraper.driver is not None)
+    return {"status": "ok", "busy": is_busy, "unimed_alive": unimed_alive, "clmf_alive": clmf_alive}
 
 @app.post("/restart")
 def restart_driver():
-    global scraper
-    print(">>> Received manual restart request. Closing driver...")
+    global unimed_scraper, clmf_scraper
+    print(">>> Received manual restart request. Closing drivers...")
     with driver_lock:
-        if scraper:
-            try:
-                scraper.close_driver()
-            except: pass
-            # Kill orphan chrome/chromedriver processes for a clean slate
-            kill_orphan_chrome_processes()
-            time.sleep(1)  # Wait for processes to fully terminate
-            try:
-                scraper.start_driver()
-                scraper.login()
-            except Exception as e:
-                return {"status": "error", "message": f"Failed to restart: {e}"}
-    return {"status": "success", "message": "Driver restarted"}
+        try:
+            if unimed_scraper:
+                unimed_scraper.close_driver()
+            if clmf_scraper:
+                clmf_scraper.close_driver()
+        except: pass
+        
+        # Kill orphan chrome/chromedriver processes for a clean slate
+        kill_orphan_chrome_processes()
+        time.sleep(1)  # Wait for processes to fully terminate
+        
+        try:
+            if unimed_scraper:
+                unimed_scraper.start_driver()
+                unimed_scraper.login()
+            # CLMF is lazy loaded, no need to start here unless required
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to restart: {e}"}
+            
+    return {"status": "success", "message": "Drivers restarted"}
 
 @app.post("/process_job")
 def process_job(job: JobRequest):

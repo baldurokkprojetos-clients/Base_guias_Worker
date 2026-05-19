@@ -32,6 +32,8 @@ class Job(Base):
     id = Column(Integer, primary_key=True, index=True)
     carteirinha_id = Column(Integer, ForeignKey("carteirinhas.id", ondelete="CASCADE"))
     status = Column(Text, nullable=False, default="pending")  # success, pending, processing, error
+    rotina = Column(Text, nullable=True, index=True)     # ex: 'clmf_atualizar_rc'
+    params = Column(JSONB, nullable=True)                # parâmetros arbitrários do job
     attempts = Column(Integer, default=0)
     priority = Column(Integer, default=0)
     locked_by = Column(Text)  # Server URL
