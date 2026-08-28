@@ -564,8 +564,8 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
                             job.id,
                             cart_obj.carteirinha,
                             cart_obj.id,
-                            job.rotina or "",   # NOVO: tipo do job
-                            job.params or {},    # NOVO: parâmetros arbitrários
+                            getattr(job, "rotina", "") or "",   # tipo do job (legado = "")
+                            getattr(job, "params", {}) or {},   # parâmetros arbitrários
                             server_status_map,
                         )
                     )
