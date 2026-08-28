@@ -20,7 +20,7 @@ class UnimedScraper:
     def __init__(self, db: Session = None):
         self.driver = None
         self.username = os.environ.get("SGUCARD_LOGIN", "REC2209525")
-        self.password = os.environ.get("SGUCARD_PASSWORD", "Unimed@2025")
+        self.password = os.environ.get("SGUCARD_PASSWORD", "Unimed2026@")
         self.headless = os.environ.get("SGUCARD_HEADLESS", "false").lower() == "true"
         # Removed long-lived self.db session to avoid stale transactions
         
@@ -318,9 +318,12 @@ class UnimedScraper:
                                     decoded_html = html.unescape(raw_html)
                                     soup = BeautifulSoup(decoded_html, "html.parser")
                                     guide_codigo = soup.find("td", class_="hint-td-cd-item").get_text(strip=True)
+                                    ds_el = soup.find("td", class_="hint-td-ds-item")
+                                    guide_descricao = ds_el.get_text(strip=True).lstrip("- ").strip() if ds_el else ""
                                 except Exception as e:
                                     guide_codigo = ""
-                                    self.log(f"Failed to extract guide_codigo: {str(e)}", level="WARNING", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                    guide_descricao = ""
+                                    self.log(f"Failed to extract guide_codigo/descricao: {str(e)}", level="WARNING", job_id=job_id, carteirinha_id=carteirinha_db_id)
                                 
                                 try:
                                     guide_numero = link_element.text.strip()
@@ -343,6 +346,7 @@ class UnimedScraper:
                                                 
                                             valida_guias[guide_numero] = {
                                                 "codigo_procedimento": guide_codigo,
+                                                "descricao_procedimento": guide_descricao,
                                                 "Vinculo_prestador": err_msg
                                             }
                                             # Also add to collected_data
@@ -352,6 +356,7 @@ class UnimedScraper:
                                                 "senha": None,
                                                 "validade_senha": None,
                                                 "codigo_procedimento": guide_codigo,
+                                                "descricao_procedimento": guide_descricao,
                                                 "qtde_solicitada": 0,
                                                 "qtde_autorizada": 0
                                             })
@@ -390,6 +395,7 @@ class UnimedScraper:
                                                         
                                                         valida_guias[guide_numero] = {
                                                             "codigo_procedimento": guide_codigo,
+                                                            "descricao_procedimento": guide_descricao,
                                                             "Vinculo_prestador": err_msg
                                                         }
                                                         
@@ -400,6 +406,7 @@ class UnimedScraper:
                                                             "senha": None,
                                                             "validade_senha": None,
                                                             "codigo_procedimento": guide_codigo,
+                                                            "descricao_procedimento": guide_descricao,
                                                             "qtde_solicitada": 0,
                                                             "qtde_autorizada": 0
                                                         })
@@ -436,6 +443,7 @@ class UnimedScraper:
                                             "senha": senha,
                                             "validade_senha": data_valid,
                                             "codigo_procedimento": cod_terapia,
+                                            "descricao_procedimento": guide_descricao,
                                             "qtde_solicitada": qtde_solic,
                                             "qtde_autorizada": qtde_aut,
                                             "status": "Autorizado"
@@ -444,6 +452,7 @@ class UnimedScraper:
                                         numero_chave = guide_numero or new_num_guia
                                         valida_guias[numero_chave] = {
                                             "codigo_procedimento": guide_codigo or cod_terapia,
+                                            "descricao_procedimento": guide_descricao,
                                             "Vinculo_prestador": "Guia Válida"
                                         }
                                         self.log(f"Scraped Guia {new_num_guia}", job_id=job_id, carteirinha_id=carteirinha_db_id)
