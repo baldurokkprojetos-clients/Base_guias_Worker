@@ -1,0 +1,557 @@
+
+# ==============================================================================
+# PROMPT YAML — Documentação Técnica do Worker de Validação de Guias Unimed
+# Projeto: Import_base_unimed
+# Data: 2026-03-18
+# Finalidade: Referência para reuso desta lógica em outra aplicação
+# ==============================================================================
+
+metadata:
+  projeto: Import_base_unimed
+  modulo: Worker (Validação de Guias Unimed SGUCARD)
+  arquivos_envolvidos:
+    - Worker/ImportBaseGuias.py    # Scraper Selenium — extração e validação das guias
+    - Worker/server.py             # API FastAPI — expõe o scraper como serviço HTTP
+    - Worker/dispatcher.py        # Dispatcher — consome a fila de jobs e aciona server.py
+    - Worker/models.py             # Modelos SQLAlchemy — espelha as tabelas do banco
+    - Worker/database.py           # Configuração da conexão (SessionLocal, Base)
+    - Worker/Requirements.txt      # Dependências Python do Worker
+
+# ==============================================================================
+# 1. DEPENDÊNCIAS
+# ==============================================================================
+
+dependencias:
+  arquivo: Worker/Requirements.txt
+
+  lista:
+    - pacote: selenium
+      versao_minima: "4.0.0"
+      uso: >
+        Automatização do navegador Chrome para acessar o portal SGUCARD da Unimed
+        (https://sgucard.unimedgoiania.coop.br). Realiza login, navegação entre
+        páginas, clique em elementos e extração de dados das guias autorizadas.
+
+    - pacote: beautifulsoup4
+      versao_minima: "4.12.0"
+      importacao_no_codigo: "from bs4 import BeautifulSoup"
+      uso: >
+        Extraí o `codigo_terapia` (código do procedimento) de um campo HTML oculto
+        (<input name="HTML_HINT_ITEM">) presente em cada linha da tabela de guias.
+        O valor do atributo `value` desse input contém HTML encodado (entidades HTML)
+        com uma tabela interna contendo a célula <td class="hint-td-cd-item">.
+        O BeautifulSoup faz o parse desse HTML embutido e extrai o texto dessa célula.
+      local_de_uso:
+        arquivo: Worker/ImportBaseGuias.py
+        linhas: 300-307
+        trecho: |
+          input_hidden = self.driver.find_element(By.XPATH, f'{row_xpath}//input[@name="HTML_HINT_ITEM"]')
+          raw_html = input_hidden.get_attribute("value")
+          decoded_html = html.unescape(raw_html)
+          soup = BeautifulSoup(decoded_html, "html.parser")
+          guide_codigo = soup.find("td", class_="hint-td-cd-item").get_text(strip=True)
+
+    - pacote: html  # módulo padrão Python
+      importacao_no_codigo: "import html"
+      uso: >
+        Decodifica entidades HTML (ex: &lt;, &gt;, &amp;) do atributo `value`
+        antes de passar o conteúdo ao BeautifulSoup. Necessário pois o SGUCARD
+        armazena HTML encodado no atributo `value` do input hidden.
+      local_de_uso:
+        arquivo: Worker/ImportBaseGuias.py
+        linha: 302
+        trecho: "decoded_html = html.unescape(raw_html)"
+
+    - pacote: sqlalchemy
+      versao_minima: "2.0.0"
+      uso: >
+        ORM para acessar o banco PostgreSQL. Utilizado para salvar guias na tabela
+        `base_guias`, persistir logs na tabela `logs` e atualizar a coluna
+        `valida_prestador` da tabela `jobs` após o processamento de cada carteirinha.
+
+    - pacote: psycopg2-binary
+      versao_minima: "2.9.0"
+      uso: Driver PostgreSQL usado internamente pelo SQLAlchemy.
+
+    - pacote: fastapi
+      versao_minima: "0.109.0"
+      uso: Framework da API HTTP do server.py que expõe o endpoint /process_job.
+
+    - pacote: uvicorn
+      versao_minima: "0.27.0"
+      uso: Servidor ASGI que executa a aplicação FastAPI do server.py.
+
+    - pacote: pydantic
+      versao_minima: "2.5.0"
+      uso: Validação do payload recebido no endpoint /process_job (modelo JobRequest).
+
+    - pacote: requests
+      versao_minima: "2.31.0"
+      uso: Usado pelo dispatcher.py para fazer chamadas HTTP ao server.py (/process_job).
+
+    - pacote: python-dotenv
+      versao_minima: "1.0.0"
+      uso: Carregamento de variáveis de ambiente do arquivo .env (credenciais, URLs).
+
+
+# ==============================================================================
+# 2. DESCRIÇÃO DO CÓDIGO — POR ARQUIVO E POR BLOCO
+# ==============================================================================
+
+codigo:
+
+  # ----------------------------------------------------------------------------
+  # 2.1 ImportBaseGuias.py — Classe UnimedScraper
+  # ----------------------------------------------------------------------------
+  ImportBaseGuias.py:
+    classe: UnimedScraper
+    responsabilidade: >
+      Automatiza o acesso ao portal SGUCARD da Unimed Goiânia para extrair e
+      validar guias autorizadas de um beneficiário (carteirinha).
+      Retorna um dict estruturado com dois blocos: `valida_prestador` e `guias_scraped`.
+
+    metodos:
+
+      __init__:
+        linhas: 20-25
+        descricao: >
+          Inicializa as credenciais de acesso (SGUCARD_LOGIN / SGUCARD_PASSWORD)
+          via variáveis de ambiente, configura modo headless (SGUCARD_HEADLESS)
+          e abre uma sessão no banco de dados.
+
+      log:
+        linhas: 27-40
+        descricao: >
+          Grava mensagem de log no stdout e persiste na tabela `logs` do banco,
+          associando opcionalmente ao `job_id` e `carteirinha_id`.
+
+      funccarteira:
+        linhas: 42-58
+        descricao: >
+          Divide a carteirinha (ex: 0064.8000.400948.00-5) em 5 partes usando
+          regex (split por '.' ou '-'). Retorna x1, x2, x3, x4, x5 para
+          preenchimento do formulário SGUCARD.
+
+      start_driver / close_driver:
+        linhas: 60-74
+        descricao: >
+          Inicia e encerra o WebDriver Chrome com opções de automação
+          (--disable-blink-features=AutomationControlled, --no-sandbox, etc).
+
+      login:
+        linhas: 76-99
+        descricao: >
+          Acessa a URL de login do SGUCARD, preenche os campos `login` e
+          `passwordTemp` e clica em `Button_DoLogin`. Aguarda 4s para carregar.
+
+      process_carteirinha:
+        linhas: 103-428
+        descricao: >
+          Método principal de extração. Recorre ao portal após login para consultar
+          guias autorizadas de uma carteirinha específica.
+        fluxo:
+          - passo: "Verifica janelas abertas e foca na janela principal"
+            linhas: 107-109
+          - passo: "Clica no ícone 'new_exame' (#cadastro_biometria) para abrir popup"
+            linhas: 147-153
+          - passo: "Troca para a janela popup aberta"
+            linhas: 157-163
+          - passo: "Preenche formulário com partes da carteirinha (nr_via, DS_CARTAO, CD_DEPENDENCIA)"
+            linhas: 165-191
+          - passo: "Aguarda a tabela de resultados (#s_NR_GUIA). Se timeout → retorna estrutura vazia"
+            linhas: 196-203
+          - passo: "Ordena tabela por data (2 cliques no cabeçalho XPath)"
+            linhas: 216-234
+          - passo: "Loop de paginação: itera linhas da tabela, processa apenas status 'Autorizado'"
+            linhas: 238-399
+          - passo: >
+              Para cada guia autorizada:
+              1. Lê a data da guia e aplica filtro de corte (270 dias)
+              2. Extrai `guide_codigo` via HTML oculto + BeautifulSoup
+              3. Extrai `guide_numero` via link <a> da coluna 4
+              4. Clica no link para abrir a tela de detalhe da guia
+              5. Verifica se existe label_error_redeAtendPrestEspec (acesso negado ao prestador)
+              6. Se acesso negado: popula valida_guias[guide_numero] com mensagem de erro
+              7. Se acesso OK: extrai campos detalhados e popula collected_data e valida_guias
+              8. Retorna à listagem via Button_Voltar
+            linhas: 252-385
+          - passo: "Navega para próxima página se link 'Próxima' existir"
+            linhas: 388-395
+          - passo: "Fecha popup, volta para janela principal"
+            linhas: 401-402
+          - passo: "Determina tipo_json com base em valida_guias e retorna resultado"
+            linhas: 404-421
+
+        retorno:
+          tipo: dict
+          estrutura: |
+            {
+              "valida_prestador": {
+                "tipo_json": "<string ou null>",
+                "guias": { "<numero_guia>": { "codigo_terapia": "...", "Vinculo_prestador": "..." }, ... }
+              },
+              "guias_scraped": [
+                {
+                  "numero_guia": "...",
+                  "data_autorizacao": "DD/MM/YYYY",
+                  "senha": "...",
+                  "validade_senha": "DD/MM/YYYY",
+                  "codigo_terapia": "...",
+                  "qtde_solicitada": "...",
+                  "qtde_autorizada": "...",
+                  "status": "Autorizado"
+                }
+              ]
+            }
+
+  # ----------------------------------------------------------------------------
+  # 2.2 server.py — API FastAPI (Wrapper do Scraper)
+  # ----------------------------------------------------------------------------
+  server.py:
+    responsabilidade: >
+      Expõe o UnimedScraper como um serviço HTTP via FastAPI.
+      Gerencia o ciclo de vida do driver (inatividade, reinicialização).
+      Recebe chamadas do dispatcher via POST /process_job.
+
+    blocos_principais:
+
+      lifespan:
+        linhas: 83-95
+        descricao: >
+          Contexto de inicialização: instancia UnimedScraper, inicia o driver
+          e realiza login ao subir a aplicação. Fecha o driver ao encerrar.
+
+      maintain_driver_lifecycle:
+        linhas: 64-78
+        descricao: >
+          Thread daemon que verifica a cada 60s se o driver ficou inativo por mais
+          de 20min (INACTIVITY_LIMIT). Se sim, fecha o driver e mata processos
+          Chrome órfãos via kill_orphan_chrome_processes().
+
+      POST /process_job:
+        linhas: 129-184
+        descricao: >
+          Recebe o payload JobRequest (job_id, carteirinha_id, carteirinha, paciente).
+          Se o driver estiver fechado (por inatividade), reinicia e reloga.
+          Chama scraper.process_carteirinha() com o driver_lock ativo (thread-safe).
+          Retorna: {"status": "success", "data": <resultado do scraper>, "carteirinha_id": ...}
+
+      POST /restart:
+        linhas: 110-127
+        descricao: >
+          Endpoint para reinicialização manual do driver Chrome. Fecha o driver atual,
+          mata processos órfãos, aguarda 1s e reinicia + reloga.
+
+  # ----------------------------------------------------------------------------
+  # 2.3 dispatcher.py — Consumidor da Fila de Jobs
+  # ----------------------------------------------------------------------------
+  dispatcher.py:
+    responsabilidade: >
+      Monitora a tabela `jobs` do banco (status=pending) e aciona o server.py
+      para processar cada job. Após retorno do servidor, persiste o resultado
+      nas tabelas `base_guias` e `jobs` (coluna valida_prestador).
+
+    blocos_principais:
+
+      call_server:
+        linhas: 220-419
+        descricao: >
+          Função executada em thread separada. Faz POST ao /process_job.
+          Ao receber resposta success, separa os dois blocos do retorno:
+          - `guias_scraped` → salvo na tabela `base_guias` (upsert por guia+carteirinha_id)
+          - `valida_prestador` → salvo na coluna JSONB `valida_prestador` da tabela `jobs`
+
+        bloco_separacao_retorno:
+          linhas: 262-272
+          descricao: >
+            Suporte ao novo formato (dict com guias_scraped/valida_prestador)
+            e ao formato legado (lista direta). Garante retrocompatibilidade.
+          codigo: |
+            if isinstance(raw_results, dict):
+                results = raw_results.get("guias_scraped", [])
+                valida_payload = raw_results.get("valida_prestador", None)
+            else:
+                results = raw_results if isinstance(raw_results, list) else []
+                valida_payload = None
+
+        bloco_persistencia_valida_prestador:
+          linhas: 395-398
+          descricao: >
+            Após commit das guias em base_guias, atribui o dict valida_prestador
+            à coluna JSONB do job e comita.
+          codigo: |
+            if valida_payload:
+                current_job.valida_prestador = valida_payload
+            thread_db.commit()
+
+      retry_failed_jobs:
+        linhas: 75-91
+        descricao: >
+          Recoloca em status=pending os jobs com status=error e attempts < 3.
+          Executado no início de cada ciclo do loop principal.
+
+      recover_stuck_jobs:
+        linhas: 94-115
+        descricao: >
+          Reseta para pending jobs presos em status=processing por mais de 15min.
+
+  # ----------------------------------------------------------------------------
+  # 2.4 models.py — Modelos SQLAlchemy
+  # ----------------------------------------------------------------------------
+  models.py:
+    responsabilidade: >
+      Espelha as tabelas do banco PostgreSQL usadas pelo worker.
+      São independentes dos modelos do backend principal.
+
+    tabelas:
+
+      carteirinhas:
+        modelo: Carteirinha
+        colunas_relevantes:
+          - "id: Integer PK"
+          - "carteirinha: Text (unique, not null)"
+          - "paciente: Text"
+          - "id_paciente: Integer"
+          - "id_pagamento: Integer"
+          - "status: Text"
+
+      jobs:
+        modelo: Job
+        descricao_nova_coluna: >
+          A coluna `valida_prestador` do tipo JSONB foi adicionada para armazenar
+          o resultado consolidado da validação das guias de cada job.
+        colunas_relevantes:
+          - "id: Integer PK"
+          - "carteirinha_id: FK → carteirinhas.id"
+          - "status: Text (pending / processing / success / error)"
+          - "attempts: Integer"
+          - "priority: Integer"
+          - "locked_by: Text (URL do server que processou)"
+          - "timeout: DateTime"
+          - "valida_prestador: JSONB nullable  ← NOVA COLUNA"
+          - "created_at: DateTime"
+          - "updated_at: DateTime"
+        declaracao_coluna:
+          linha: 39
+          codigo: |
+            valida_prestador = Column(JSONB, nullable=True)
+
+      base_guias:
+        modelo: BaseGuia
+        colunas_relevantes:
+          - "id: Integer PK"
+          - "carteirinha_id: FK → carteirinhas.id"
+          - "guia: Text"
+          - "data_autorizacao: Date"
+          - "senha: Text"
+          - "validade: Date"
+          - "codigo_terapia: Text"
+          - "qtde_solicitada: Integer"
+          - "sessoes_autorizadas: Integer"
+
+      logs:
+        modelo: Log
+        colunas_relevantes:
+          - "id: Integer PK"
+          - "job_id: FK → jobs.id (nullable)"
+          - "carteirinha_id: FK → carteirinhas.id (nullable)"
+          - "level: Text (INFO / WARNING / ERROR)"
+          - "message: Text"
+
+
+# ==============================================================================
+# 3. PADRÃO DO JSON — valida_prestador
+# ==============================================================================
+
+json_valida_prestador:
+
+  descricao: >
+    Estrutura JSON gerada pelo método `process_carteirinha` da classe UnimedScraper
+    e armazenada na coluna `valida_prestador` (JSONB) da tabela `jobs`.
+    Reune, por número de guia, o código de terapia e o vínculo com o prestador.
+
+  estrutura_completa: |
+    {
+      "tipo_json": "<string | null>",
+      "guias": {
+        "<numero_guia_1>": {
+          "codigo_terapia": "<código do procedimento>",
+          "Vinculo_prestador": "<mensagem de vínculo>"
+        },
+        "<numero_guia_2>": {
+          "codigo_terapia": "<código do procedimento>",
+          "Vinculo_prestador": "<mensagem de erro de acesso>"
+        }
+      }
+    }
+
+  exemplo_all_success: |
+    {
+      "tipo_json": "All Sucess",
+      "guias": {
+        "3109876543": {
+          "codigo_terapia": "50000470",
+          "Vinculo_prestador": "Guia Válida"
+        },
+        "3109876544": {
+          "codigo_terapia": "50000470",
+          "Vinculo_prestador": "Guia Válida"
+        }
+      }
+    }
+
+  exemplo_thered: |
+    {
+      "tipo_json": "Thered",
+      "guias": {
+        "3109876543": {
+          "codigo_terapia": "50000470",
+          "Vinculo_prestador": "Guia Válida"
+        },
+        "3109876544": {
+          "codigo_terapia": "50000470",
+          "Vinculo_prestador": "Acesso negado pelo sistema restrito ao prestador"
+        }
+      }
+    }
+
+  exemplo_sem_guias: |
+    {
+      "tipo_json": null,
+      "guias": null
+    }
+
+
+# ==============================================================================
+# 4. REGRAS DE ATRIBUIÇÃO — tipo_json
+# ==============================================================================
+
+regras_tipo_json:
+
+  descricao: >
+    O campo `tipo_json` é calculado ao final do método `process_carteirinha`
+    com base no conteúdo do dict `valida_guias` acumulado durante o scraping.
+    Existem 3 valores possíveis.
+
+  valores:
+
+    null:
+      condicao: >
+        Nenhuma guia foi encontrada/processada — `valida_guias` está vazio.
+        Pode ocorrer porque: não há guias com status "Autorizado" para esta
+        carteirinha, timeout na tabela de resultados, ou todas as guias são
+        mais antigas que 270 dias.
+      codigo_referencia: |
+        # ImportBaseGuias.py — linhas 283-285 e 410-412
+        if not valida_guias:
+            tipo_json = None
+            valida_guias_out = None
+
+    All Sucess:
+      condicao: >
+        Existem guias processadas E TODAS têm `Vinculo_prestador == "Guia Válida"`.
+        Indica que todas as guias do paciente estão vinculadas ao prestador consultante.
+      codigo_referencia: |
+        # ImportBaseGuias.py — linhas 287, 404, 414
+        tipo_json = "All Sucess"
+        # (valor default se houver guias; sobrescrito para "Thered" se houver qualquer exceção)
+
+    Thered:
+      condicao: >
+        Existem guias processadas MAS pelo menos UMA delas tem
+        `Vinculo_prestador != "Guia Válida"`. Normalmente indica que o sistema
+        SGUCARD retornou mensagem de acesso restrito para aquela guia, como:
+        "Acesso negado pelo sistema restrito ao prestador" ou outro texto do
+        elemento `label_error_redeAtendPrestEspec`.
+      codigo_referencia: |
+        # ImportBaseGuias.py — linhas 279-280, 288-289, 405-406, 415-416
+        if any(val.get("Vinculo_prestador") != "Guia Válida" for val in valida_guias.values()):
+            tipo_json = "Thered"
+
+  fluxo_decisao: |
+    valida_guias = {}  (vazio)
+        └── tipo_json = null
+
+    valida_guias = { ... }  (não vazio)
+        ├── TODOS Vinculo_prestador == "Guia Válida"
+        │       └── tipo_json = "All Sucess"
+        └── ALGUM Vinculo_prestador != "Guia Válida"
+                └── tipo_json = "Thered"
+
+  origem_vinculo_prestador:
+    valor_valido:
+      condicao: "Scraping da tela de detalhe completado com sucesso (Button_Voltar presente)"
+      valor: "Guia Válida"
+      linha: 366
+
+    valor_invalido:
+      condicao: >
+        Elemento `label_error_redeAtendPrestEspec` detectado na tela de detalhe
+        (visível ou com style=block). O texto do elemento é usado como valor;
+        se vazio, usa mensagem padrão.
+      valor_padrao: "Acesso negado pelo sistema restrito ao prestador"
+      linhas: 320-336
+
+
+# ==============================================================================
+# 5. NOVA COLUNA — tabela jobs (valida_prestador)
+# ==============================================================================
+
+nova_coluna_jobs:
+
+  tabela: jobs
+  coluna: valida_prestador
+  tipo_sql: JSONB
+  nullable: true
+  descricao: >
+    Armazena o resultado consolidado da validação de guias do prestador
+    para o job processado. Contém o dict `valida_prestador` retornado
+    pelo scraper (tipo_json + mapa de guias).
+
+  declaracao_sqlalchemy:
+    arquivo: Worker/models.py
+    linha: 39
+    codigo: |
+      from sqlalchemy.dialects.postgresql import JSONB
+      # (import já presente na linha 6 do models.py)
+
+      valida_prestador = Column(JSONB, nullable=True)  # JSON de validacao do prestador
+
+  migration_sql: |
+    -- Executar no banco PostgreSQL para adicionar a coluna (se ainda não existir)
+    ALTER TABLE jobs
+    ADD COLUMN IF NOT EXISTS valida_prestador JSONB;
+
+  onde_e_salvo:
+    arquivo: Worker/dispatcher.py
+    linhas: 395-398
+    descricao: >
+      Após o commit das guias na tabela `base_guias`, o dispatcher atribui
+      o valor de `valida_payload` à coluna `valida_prestador` do job e comita.
+    codigo: |
+      if valida_payload:
+          current_job.valida_prestador = valida_payload
+      thread_db.commit()
+
+  como_consumir_em_outra_aplicacao: >
+    Para ler o `valida_prestador` de um job em outra aplicação:
+    - Via SQL: SELECT valida_prestador FROM jobs WHERE id = <job_id>;
+    - Via SQLAlchemy: job.valida_prestador  (retorna dict Python diretamente)
+    - O campo `tipo_json` indica o status geral; itere `guias` para detalhe por guia.
+
+
+# ==============================================================================
+# 6. FLUXO GERAL DO WORKER (visão macro)
+# ==============================================================================
+
+fluxo_geral:
+  etapas:
+    - "1. dispatcher.py inicia → consulta jobs com status=pending no banco"
+    - "2. Para cada job disponível: POST /process_job → server.py (porta configurada)"
+    - "3. server.py recebe o payload, chama UnimedScraper.process_carteirinha()"
+    - "4. UnimedScraper faz login no SGUCARD e scrapa as guias da carteirinha"
+    - "5. Para cada guia Autorizada: extrai guide_codigo via BeautifulSoup, detalhes via XPath"
+    - "6. Retorna dict com guias_scraped (dados completos) e valida_prestador (validação)"
+    - "7. dispatcher.py salva guias_scraped na tabela base_guias (upsert)"
+    - "8. dispatcher.py salva valida_prestador na coluna JSONB da tabela jobs"
+    - "9. dispatcher.py atualiza status do job para success ou error"

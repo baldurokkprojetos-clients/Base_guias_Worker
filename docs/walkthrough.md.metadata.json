@@ -1,0 +1,5 @@
+{
+  "artifactType":  "ARTIFACT_TYPE_WALKTHROUGH",
+  "summary":  "Walkthrough of the Base Guias Unimed system, explaining how to setup database, run backend, worker servers, dispatcher, and frontend.",
+  "updatedAt":  "2026-01-10T00:05:09.412994800Z"
+}

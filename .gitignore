@@ -1,33 +1,18 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-ENV/
+# Credenciais e configuração local (NÃO commitar)
+.env
+BaseGuias_backend.env
+system_config.json
 
-# ChromeDriver (too large, download separately)
-chromedriver.exe
-chromedriver
+# Artefatos de build
+dist/
+build/
+__pycache__/
+*.pyc
 
 # Logs
 *.log
-logs/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Test data
+# Dados locais com dados de pacientes (repo público)
 *.xlsx
-*.xls
-*.csv
+json_example_clmf.json
+page.html

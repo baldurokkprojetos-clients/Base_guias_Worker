@@ -46,23 +46,6 @@ last_activity_time = datetime.now()
 driver_lock = threading.Lock()
 INACTIVITY_LIMIT = timedelta(minutes=20)
 
-def kill_orphan_chrome_processes():
-    """Kill chrome/chromedriver processes spawned by automation (not the user's browser)."""
-    try:
-        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-            try:
-                name = (proc.info.get('name') or '').lower()
-                if 'chromedriver' in name:
-                    proc.kill()
-                elif 'chrome' in name:
-                    # Only kill automation chrome instances (spawned by webdriver)
-                    cmdline = ' '.join(proc.info.get('cmdline') or [])
-                    if '--test-type=webdriver' in cmdline:
-                        proc.kill()
-            except (psutil.AccessDenied, psutil.NoSuchProcess):
-                pass
-    except: pass
-
 
 def maintain_driver_lifecycle():
     global unimed_scraper, clmf_scraper, last_activity_time
@@ -70,28 +53,23 @@ def maintain_driver_lifecycle():
         time.sleep(60) # Check every minute
         with driver_lock:
             # Cleanup both scrapers if inactive
+            # (close_driver já mata apenas os processos deste worker)
             if datetime.now() - last_activity_time > INACTIVITY_LIMIT:
-                killed_any = False
                 if unimed_scraper and unimed_scraper.driver:
                     print(">>> Inactivity limit reached. Closing Unimed driver.")
                     try:
                         unimed_scraper.close_driver()
                         unimed_scraper.driver = None
-                        killed_any = True
                     except Exception as e:
                         print(f"Error closing Unimed driver: {e}")
-                
+
                 if clmf_scraper and clmf_scraper.driver:
                     print(">>> Inactivity limit reached. Closing CLMF driver.")
                     try:
                         clmf_scraper.close_driver()
                         clmf_scraper.driver = None
-                        killed_any = True
                     except Exception as e:
                         print(f"Error closing CLMF driver: {e}")
-                
-                if killed_any:
-                    kill_orphan_chrome_processes()
 
 # Start background thread
 threading.Thread(target=maintain_driver_lifecycle, daemon=True).start()
@@ -156,11 +134,10 @@ def restart_driver():
             if clmf_scraper:
                 clmf_scraper.close_driver()
         except: pass
-        
-        # Kill orphan chrome/chromedriver processes for a clean slate
-        kill_orphan_chrome_processes()
-        time.sleep(1)  # Wait for processes to fully terminate
-        
+        # Nota: NÃO matar chromedrivers globais aqui — cada worker só limpa
+        # os próprios processos (close_driver já o faz). Kill global derrubaria
+        # os drivers dos outros workers em pleno job.
+
         try:
             if unimed_scraper:
                 unimed_scraper.start_driver()
@@ -168,7 +145,7 @@ def restart_driver():
             # CLMF is lazy loaded, no need to start here unless required
         except Exception as e:
             return {"status": "error", "message": f"Failed to restart: {e}"}
-            
+
     return {"status": "success", "message": "Drivers restarted"}
 
 @app.post("/process_job")
@@ -183,6 +160,27 @@ def process_job(job: JobRequest):
         return _process_job_unimed(job)
 
 
+def _ensure_driver(scraper, scraper_name: str, needs_login: bool = True) -> str | None:
+    """Garante que o driver do scraper está vivo. Retorna None se ok, ou mensagem de erro."""
+    if scraper.is_driver_alive():
+        return None
+    print(f">>> {scraper_name}: driver morto ou ausente. Reiniciando...")
+    try:
+        # close_driver já mata apenas os processos DESTE worker (kill por PID)
+        scraper.close_driver()
+        scraper.start_driver()
+        if needs_login:
+            scraper.login()
+        return None
+    except Exception as e:
+        # Não vazar driver recém-criado se o login falhou
+        try:
+            scraper.close_driver()
+        except Exception:
+            pass
+        return f"Falha ao reiniciar driver {scraper_name}: {e}"
+
+
 def _process_job_clmf(job: JobRequest):
     """Processa job do convênio CLMF via CLMFScraper."""
     global clmf_scraper, last_activity_time
@@ -190,35 +188,32 @@ def _process_job_clmf(job: JobRequest):
     if not clmf_scraper:
         raise HTTPException(status_code=503, detail="CLMFScraper não inicializado")
 
-    # Inicializar driver CLMF sob demanda (lazy)
-    if not clmf_scraper.driver:
-        print(">>> CLMFScraper: driver não inicializado. Iniciando...")
-        try:
-            clmf_scraper.start_driver()
-        except Exception as e:
-            return {"status": "error", "message": f"Falha ao iniciar driver CLMF: {e}",
-                    "carteirinha_id": job.carteirinha_id}
+    # Job inteiro sob lock: evita corrida com o lifecycle de inatividade e com
+    # outros jobs sobre o mesmo driver (mesmo padrão do Unimed). Lock não é
+    # reentrante — o except abaixo NÃO deve readquirir driver_lock.
+    with driver_lock:
+        err = _ensure_driver(clmf_scraper, "CLMF", needs_login=True)
+        if err:
+            return {"status": "error", "message": err, "carteirinha_id": job.carteirinha_id}
 
-    last_activity_time = datetime.now()
-
-    try:
-        result = clmf_scraper.atualizar_rc(job.params)
         last_activity_time = datetime.now()
-        return {
-            "status": result.get("status", "error"),
-            "data": result,
-            "carteirinha_id": job.carteirinha_id,
-        }
-    except Exception as e:
-        from database import SessionLocal
-        from models import Log
-        _log_error(job.job_id, job.carteirinha_id, f"CLMF Server Crash: {e}")
-        # Reset driver em falha para não poluir próximo job
+
         try:
-            clmf_scraper.close_driver()
-        except Exception:
-            pass
-        return {"status": "error", "message": str(e), "carteirinha_id": job.carteirinha_id}
+            result = clmf_scraper.atualizar_rc(job.params)
+            last_activity_time = datetime.now()
+            return {
+                "status": result.get("status", "error"),
+                "data": result,
+                "carteirinha_id": job.carteirinha_id,
+            }
+        except Exception as e:
+            _log_error(job.job_id, job.carteirinha_id, f"CLMF Server Crash: {e}")
+            # Reset driver em falha para não poluir próximo job
+            try:
+                clmf_scraper.close_driver()
+            except Exception:
+                pass
+            return {"status": "error", "message": str(e), "carteirinha_id": job.carteirinha_id}
 
 
 def _process_job_unimed(job: JobRequest):
@@ -228,21 +223,16 @@ def _process_job_unimed(job: JobRequest):
     if not unimed_scraper:
         raise HTTPException(status_code=503, detail="Scraper não inicializado")
 
+    # Auto-recovery: verificar e reiniciar driver se necessário
     with driver_lock:
-        if not unimed_scraper.driver:
-            print(">>> Driver Unimed fechado. Reiniciando...")
-            try:
-                unimed_scraper.start_driver()
-                unimed_scraper.login()
-            except Exception as e:
-                return {"status": "error", "message": f"Failed to restart driver: {e}",
-                        "carteirinha_id": job.carteirinha_id}
-
+        err = _ensure_driver(unimed_scraper, "Unimed", needs_login=True)
+        if err:
+            return {"status": "error", "message": err, "carteirinha_id": job.carteirinha_id}
         last_activity_time = datetime.now()
 
     try:
         with driver_lock:
-            if not unimed_scraper.driver:
+            if not unimed_scraper.is_driver_alive():
                 raise Exception("Driver morreu antes do scraping.")
             results = unimed_scraper.process_carteirinha(
                 job.carteirinha,
@@ -259,9 +249,8 @@ def _process_job_unimed(job: JobRequest):
         with driver_lock:
             try:
                 if unimed_scraper:
+                    # close_driver já mata apenas os processos DESTE worker
                     unimed_scraper.close_driver()
-                    unimed_scraper.driver = None
-                kill_orphan_chrome_processes()
             except Exception:
                 pass
         return {"status": "error", "message": str(e), "carteirinha_id": job.carteirinha_id}

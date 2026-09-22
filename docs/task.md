@@ -1,0 +1,29 @@
+# Tasks
+
+- [/] Initial Exploration
+    - [x] Explore project structure and identifying existing files <!-- id: 0 -->
+    - [/] Read `Worker/ImportBaseGuias.py` to understand current scraping logic <!-- id: 1 -->
+    - [/] Read `.env` layout to understand configuration <!-- id: 2 -->
+- [/] Database Implementation
+    - [x] Design Schema for `carteirinhas`, `base_guias`, `users`, `jobs` <!-- id: 3 -->
+    - [x] Create Migrations `0001`, `0002` etc. <!-- id: 4 -->
+    - [x] Create Seed script for User (`Clinica Larissa Martins Ferreira`) <!-- id: 5 -->
+- [/] Backend & API Development
+    - [x] Setup Backend Structure (FastAPI/Flask?) <!-- id: 6 -->
+    - [x] Implement `Upload Carteirinhas` endpoint (Bulk/Overwrite) <!-- id: 7 -->
+    - [x] Implement `Create Jobs` endpoint <!-- id: 8 -->
+    - [x] Implement `Export Base Guias` endpoint (Filter by date) <!-- id: 9 -->
+- [/] Worker & Script Refactoring
+    - [x] Refactor `ImportBaseGuias.py` to consume Jobs from DB <!-- id: 10 -->
+    - [x] Implement Dispatcher/Worker Logic (Assign jobs to servers, 15s interval) <!-- id: 11 -->
+    - [x] Implement Server concurrency handling and status updates <!-- id: 12 -->
+    - [x] Improve error handling and logging in Scraper <!-- id: 13 -->
+- [/] Frontend Development
+    - [x] Setup Frontend Project (React/Vite) <!-- id: 14 -->
+    - [x] Implement Dashboard (Request jobs, filters) <!-- id: 15 -->
+    - [x] Implement Carteirinhas Management (CRUD, Upload) <!-- id: 16 -->
+    - [x] Implement Logs View <!-- id: 17 -->
+    - [x] Apply Design System (Futuristic Dashboard) <!-- id: 18 -->
+- [x] Finalization
+    - [x] Update `requirements.txt` <!-- id: 19 -->
+    - [x] Verification and Walkthrough <!-- id: 20 -->

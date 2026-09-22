@@ -1,0 +1,89 @@
+# Base Guias Unimed - System Walkthrough
+
+This document outlines the architecture, setup, and usage of the new Base Guias Unimed system.
+
+## 1. Architecture
+
+The system is composed of four main parts:
+1.  **Database**: Stores Users, Carteirinhas, Jobs, and BaseGuias (Supabase/PostgreSQL).
+2.  **Backend API**: FastAPI application (Port 8000 default for API, but used for internal communication) that manages data and endpoints.
+3.  **Worker System**:
+    -   **Server(s)**: Instance(s) of [Worker/server.py](file:///h:/Meu%20Drive/2.Faturamento/2%20-%20AUDITORIA/Import_base_unimed/Worker/server.py) that perform the scraping using Selenium.
+    -   **Dispatcher**: [Worker/dispatcher.py](file:///h:/Meu%20Drive/2.Faturamento/2%20-%20AUDITORIA/Import_base_unimed/Worker/dispatcher.py) that assigns jobs to available servers.
+4.  **Frontend**: React application for user interaction.
+
+## 2. Setup & Installation
+
+### Prerequisites
+- Python 3.9+
+- Node.js 18+
+- Chrome Browser
+
+### Step 1: Install Python Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### Step 2: Database Setup
+The system uses the database credentials from [.env](file:///h:/Meu%20Drive/2.Faturamento/2%20-%20AUDITORIA/Import_base_unimed/.env).
+To run the initial migrations (if not using an automated migration tool like Alembic yet), execute the SQL files in `backend/migrations/` manually in your Supabase SQL Editor.
+- `0001_initial_schema.sql`
+- `0002_seed_data.sql`
+
+### Step 3: Frontend Setup
+```bash
+cd frontend
+npm install
+```
+
+## 3. Running the System
+
+You will need to run multiple terminals.
+
+### Terminal 1: Backend API
+```bash
+cd backend
+uvicorn main:app --reload --port 8000
+```
+*Note: Ensure `API_PORT` in `.env` matches if referenced.*
+
+### Terminal 2: Worker Servers
+You can run multiple servers on different ports as defined in `.env` `API_SERVER_URLS`.
+```bash
+# Server 1
+set PORT=8001
+python Worker/server.py
+```
+```bash
+# Server 2 (Optional)
+set PORT=8002
+python Worker/server.py
+```
+
+### Terminal 3: Worker Dispatcher
+This script assigns jobs to waiting servers.
+```bash
+python Worker/dispatcher.py
+```
+
+### Terminal 4: Frontend
+```bash
+cd frontend
+npm run dev
+```
+
+## 4. Usage
+
+1.  **Login/Access**: Open `http://localhost:5173`.
+2.  **Upload Carteirinhas**: Go to "Carteirinhas" menu. Upload the `carteirinhas.xlsx` file. You can choose to Overwrite.
+3.  **Process Jobs**:
+    -   Go to "Dashboard".
+    -   Click "Processar Todos" to create jobs for all carteirinhas.
+    -   Or filter/select specific ones.
+4.  **Monitor**: Watch "Logs" to see real-time updates of job processing.
+5.  **Export**: On Dashboard, filter by date and import date to download the "Base Guias" report.
+
+## 5. Notes
+-   The scraping requires the **Selenium Webdriver**. Ensure Chrome is installed.
+-   The Dispatcher checks for jobs every 15 seconds.
+-   If a job fails, it will retry up to 5 times.

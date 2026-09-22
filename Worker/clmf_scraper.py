@@ -26,6 +26,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
+import psutil
+import urllib3
+
 logger = logging.getLogger(__name__)
 
 # ─── Constantes de URL ───────────────────────────────────────────────────────
@@ -60,12 +63,15 @@ class CLMFScraper:
         self.senha = senha or os.getenv("CLMF_PASSWORD", "")
         self.headless = headless
         self.driver: webdriver.Chrome | None = None
+        self._owned_pids: list[int] = []
         self._session_cookies: dict = {}
 
     # ─── Driver lifecycle ───────────────────────────────────────────────────
 
     def start_driver(self):
         """Inicializa o Chrome WebDriver."""
+        import urllib3
+
         options = Options()
         if self.headless:
             options.add_argument("--headless=new")
@@ -73,23 +79,75 @@ class CLMFScraper:
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-features=PasswordLeakDetection")
         options.add_argument("--incognito")
+        options.add_argument("--disable-extensions")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
-        
+
         # Desativar pop-up "Mude sua senha" do gerenciador de senhas do Google
         options.add_experimental_option("prefs", {
             "credentials_enable_service": False,
             "profile.password_manager_enabled": False
         })
-        
+
         options.add_argument("--window-size=1280,900")
 
         try:
-            self.driver = webdriver.Chrome(options=options)
+            service = Service()
+            self.driver = webdriver.Chrome(service=service, options=options, keep_alive=False)
+
+            # ── Fail-fast: zerar retries internos do Selenium ────────────────
+            # Sem isso, quando ChromeDriver morre, urllib3 retenta 3x (~30s perdidos)
+            self.driver.command_executor._conn = urllib3.PoolManager(
+                timeout=urllib3.Timeout(connect=10, read=120),
+                retries=urllib3.util.Retry(total=0),
+            )
+            self.driver.set_page_load_timeout(120)
+            self.driver.set_script_timeout(60)
+            self._track_driver_processes()
+
             logger.info("CLMFScraper: driver iniciado.")
         except Exception as e:
             logger.error(f"CLMFScraper: falha ao iniciar driver: {e}")
             raise
+
+    def _track_driver_processes(self):
+        """Rastreia os PIDs do chromedriver e dos chromes filhos criados por este driver."""
+        self._owned_pids = []
+        try:
+            chromedriver_pid = self.driver.service.process.pid
+            self._owned_pids.append(chromedriver_pid)
+            for child in psutil.Process(chromedriver_pid).children(recursive=True):
+                self._owned_pids.append(child.pid)
+        except Exception:
+            pass
+
+    def kill_owned_processes(self):
+        """Mata APENAS os processos (chromedriver/chrome) criados por este scraper.
+        Escopo restrito aos PIDs rastreados — nunca toca em processos de outros workers."""
+        for pid in self._owned_pids or []:
+            try:
+                proc = psutil.Process(pid)
+                name = (proc.name() or "").lower()
+                # Validar nome antes de matar: PID pode ter sido reciclado
+                if "chromedriver" in name or "chrome" in name:
+                    proc.kill()
+            except psutil.NoSuchProcess:
+                pass
+            except Exception:
+                pass
+        self._owned_pids = []
+
+    def _chromedriver_pid_alive(self) -> bool:
+        """Checagem local (sem HTTP) se o processo chromedriver rastreado existe.
+        Sem rastreamento (driver legado), assume vivo e deixa o health-check HTTP decidir."""
+        if not self._owned_pids:
+            return True
+        try:
+            return psutil.Process(self._owned_pids[0]).is_running()
+        except psutil.NoSuchProcess:
+            return False
+        except Exception:
+            return True
 
     def close_driver(self):
         """Fecha o WebDriver de forma segura."""
@@ -100,7 +158,35 @@ class CLMFScraper:
                 pass
             finally:
                 self.driver = None
+        # Garantia: mata chromedriver/chrome que sobreviveram ao quit() travado
+        # (escopo restrito aos PIDs deste scraper).
+        self.kill_owned_processes()
         logger.info("CLMFScraper: driver encerrado.")
+
+    def is_driver_alive(self) -> bool:
+        """Verifica se o ChromeDriver ainda responde.
+        Checa primeiro o PID localmente (instantâneo, sem HTTP) e só faz o
+        health-check HTTP se o processo ainda existir."""
+        if not self.driver:
+            return False
+        if not self._chromedriver_pid_alive():
+            return False
+        try:
+            self.driver.window_handles
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_connection_error(exc: Exception) -> bool:
+        """True se a exceção indica que o processo chromedriver morreu
+        (conexão recusada na porta local do driver)."""
+        if isinstance(exc, (ConnectionError, urllib3.exceptions.MaxRetryError)):
+            return True
+        msg = str(exc)
+        return ("Max retries exceeded" in msg
+                or "WinError 10061" in msg
+                or "Connection refused" in msg)
 
     # ─── OP0: Login ─────────────────────────────────────────────────────────
 

@@ -85,6 +85,7 @@ def retry_failed_jobs(db):
             logger.info(f"Retrying {len(failed_jobs)} failed jobs...")
             for job in failed_jobs:
                 job.status = "pending"
+                job.locked_by = None
                 job.updated_at = datetime.utcnow()
             db.commit()
     except Exception as e:

@@ -1,0 +1,25 @@
+# Python Version: 3.12 (Recommended)
+# Backend
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+pydantic
+pydantic-settings
+python-multipart
+python-dotenv
+requests
+
+# Worker / Data Processing
+selenium>=4.20,<5
+openpyxl
+xlsxwriter
+supabase
+gotrue
+beautifulsoup4
+
+# System / GUI
+psutil
+pystray
+Pillow
+winotify

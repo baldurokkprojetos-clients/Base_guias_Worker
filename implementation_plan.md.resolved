@@ -1,0 +1,60 @@
+# Worker Health Monitoring Implementation Plan
+
+We will implement a system to monitor the health and status of background workers, allowing for visibility and control (restart) from the web interface.
+
+## User Review Required
+
+> [!IMPORTANT]
+> This feature requires updates to the **Worker scripts** running on the local machine to send heartbeats and listen for commands. I will provide a guide on how to update them.
+
+## Proposed Changes
+
+### Database
+
+#### [NEW] [Worker Model](file:///c:/dev/Clone_agenda_hub_basic/backend/models.py)
+Create a `workers` table to store:
+- `id` (PK)
+- `hostname` (Text, Unique) - Name of the machine/worker
+- `status` (Text) - 'idle', 'processing', 'offline', 'error'
+- `last_heartbeat` (DateTime) - Timestamp of last ping
+- `current_job_id` (Integer, FK) - Optional, ID of user job being processed
+- `command` (Text) - 'restart' or null/empty
+- `meta` (JSON) - Extra info (CPU, RAM, version)
+
+### Backend API
+
+#### [NEW] [Worker Service](file:///c:/dev/Clone_agenda_hub_basic/backend/services/worker_service.py)
+- `register_heartbeat(hostname, status, current_job_id, meta)`: Updates worker status. Returns pending commands.
+- `queue_restart(worker_id)`: Sets `command='restart'`.
+- `get_workers()`: Lists all workers. Logic to mark as 'offline' if `last_heartbeat` > 1 min.
+
+#### [MODIFY] [main.py](file:///c:/dev/Clone_agenda_hub_basic/backend/main.py)
+- Register new `workers` router.
+
+#### [NEW] [Worker Routes](file:///c:/dev/Clone_agenda_hub_basic/backend/routes/workers.py)
+- `POST /workers/heartbeat`
+- `GET /workers`
+- `POST /workers/{id}/restart`
+
+### Frontend
+
+#### [NEW] Components
+- `WorkerStatusBadge`: Reusable badge component.
+- `WorkerList`: Component to list workers, show status icons, and restart button.
+
+#### [MODIFY] [Logs.jsx](file:///c:/dev/Clone_agenda_hub_basic/frontend/src/pages/Logs.jsx)
+- Embed `WorkerList` at the top.
+
+#### [MODIFY] [Importacoes.jsx](file:///c:/dev/Clone_agenda_hub_basic/frontend/src/pages/Importacoes.jsx)
+- Embed `WorkerList` (or a compact version) at the top.
+
+## Verification Plan
+
+### Manual Verification
+1.  Run backend and frontend.
+2.  Simulate a worker heartbeat using `curl` or a test script.
+    -   `POST /workers/heartbeat` with `hostname="TestWorker"`, `status="idle"`.
+3.  Verify "TestWorker" appears as "Online/Ocioso" in the UI.
+4.  Stop sending heartbeats. Verify it turns "Offline" after 1 minute (UI logic).
+5.  Click "Restart". Verify database `command` field becomes 'restart'.
+6.  Send heartbeat again. Verify response contains `command: 'restart'`.

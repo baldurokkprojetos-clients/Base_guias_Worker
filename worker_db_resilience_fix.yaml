@@ -1,0 +1,112 @@
+name: worker_db_resilience_fix
+version: "1.0"
+description: >
+  Correções de resiliência no worker externo para tolerar instabilidade
+  temporária do Supabase (SSL drops, connection timeouts, pool starvation).
+  Confirmar pelo Downdetector: o Supabase pode encerrar conexões SSL sem aviso.
+
+# ─────────────────────────────────────────────
+# ARQUIVO: worker/Worker/database.py
+# ─────────────────────────────────────────────
+changes:
+  - file: worker/Worker/database.py
+    priority: CRÍTICA
+    reason: >
+      O engine é criado com create_engine(url) sem nenhum parâmetro.
+      Quando o Supabase derruba a conexão SSL, qualquer SessionLocal() trava
+      indefinidamente ou lança OperationalError sem retry.
+    diff: |
+      # ANTES (linha 38):
+      engine = create_engine(SQLALCHEMY_DATABASE_URL)
+
+      # DEPOIS:
+      engine = create_engine(
+          SQLALCHEMY_DATABASE_URL,
+          pool_pre_ping=True,        # testa conexão antes de reutilizar do pool
+          pool_recycle=300,          # recicla conexões a cada 5 min (evita SSL stale)
+          pool_size=3,               # worker local não precisa de pool grande
+          max_overflow=5,
+          pool_timeout=30,
+          connect_args={
+              "connect_timeout": 10,     # falha rápido se DB inacessível
+              "keepalives": 1,           # habilita TCP keepalives
+              "keepalives_idle": 30,     # keepalive após 30s idle
+              "keepalives_interval": 10, # retransmite a cada 10s
+              "keepalives_count": 5,     # abandona após 5 falhas consecutivas
+          }
+      )
+
+# ─────────────────────────────────────────────
+# ARQUIVO: worker/Worker/dispatcher.py
+# ─────────────────────────────────────────────
+  - file: worker/Worker/dispatcher.py
+    priority: ALTA
+    reason: >
+      O loop principal (linha 421) abre db = SessionLocal() sem try/except
+      em torno da criação da sessão. Se o pool estiver esgotado ou o DB
+      inacessível no momento da abertura, a exceção sobe direto para o
+      handler genérico da linha 516 que dorme 15s e tenta de novo —
+      aceitável, mas pode ser melhorado para distinguir DB error de bug.
+      Adicionalmente: múltiplas sessões (vp_log_session, log_session, etc.)
+      são abertas sem garantia de fechamento em caso de exceção.
+    diffs:
+      - section: "Loop principal — abertura de sessão (linha 423)"
+        before: |
+          db = SessionLocal()
+        after: |
+          try:
+              db = SessionLocal()
+          except Exception as db_open_err:
+              logger.error(f"Dispatcher: could not open DB session: {db_open_err}")
+              time.sleep(15)
+              continue
+
+      - section: "call_server — sessões temporárias de log (linhas 230-234, 278-281, 375-378, 382-385)"
+        note: >
+          Cada SessionLocal() aberta para log deve ser envolvida em
+          try/finally para garantir db.close() mesmo em erro. Exemplo:
+        before: |
+          vp_log_session = SessionLocal()
+          vp_log_session.add(Log(...))
+          vp_log_session.commit()
+          vp_log_session.close()
+        after: |
+          _s = SessionLocal()
+          try:
+              _s.add(Log(...))
+              _s.commit()
+          except Exception:
+              pass
+          finally:
+              _s.close()
+
+# ─────────────────────────────────────────────
+# NÃO É NECESSÁRIO ALTERAR
+# ─────────────────────────────────────────────
+no_changes_needed:
+  - file: worker/Worker/server.py
+    reason: >
+      Não usa SQLAlchemy diretamente — delega ao scraper (Selenium).
+      Resiliente a falhas de scraping via try/except no process_job.
+  - file: worker/Worker/models.py
+    reason: Apenas definições ORM, sem lógica de conexão.
+
+# ─────────────────────────────────────────────
+# VERIFICAÇÃO PÓS-DEPLOY
+# ─────────────────────────────────────────────
+verification:
+  steps:
+    - step: Simular instabilidade
+      action: >
+        Temporariamente mudar SUPABASE_DB_HOST para valor inválido no .env
+        e iniciar o dispatcher. Verificar nos logs que ele imprime
+        "could not open DB session: ..." e retoma em 15s sem travar.
+    - step: Verificar pool_pre_ping
+      action: >
+        Iniciar dispatcher normalmente, aguardar 5 min sem jobs,
+        depois criar um job. O pool_pre_ping vai testar a conexão
+        antes de reutilizá-la — não deve aparecer SSL errors.
+    - step: Confirmar keepalives nos logs SO
+      action: >
+        Em Linux/Mac: ss -tnp | grep 5432
+        Verificar que conexões do worker têm keepalive ativo.

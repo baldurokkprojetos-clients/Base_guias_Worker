@@ -1,0 +1,95 @@
+# Guia de Atualização do Worker (Multi-Server)
+
+Como você possui **um script local gerenciando 4 servidores (slots)**, a melhor estratégia é registrar cada um desses "servidores" como um worker individual no banco de dados.
+
+Isso permite que você veja o status individual de cada um (qual Job cada um está processando) e possa reiniciar comandos especificamente.
+
+## Estratégia de Nomes
+No seu script, ao invés de enviar apenas `HOSTNAME`, você enviará:
+- `HOSTNAME-1`
+- `HOSTNAME-2`
+- `HOSTNAME-3`
+- `HOSTNAME-4`
+
+## Exemplo de Código (Multi-Thread/Slots)
+
+```python
+import time
+import requests
+import socket
+import threading
+import os
+import sys
+
+# Configurações
+API_URL = "https://seu-backend-url.com" 
+HOSTNAME = socket.gethostname()
+NUM_SERVERS = 4
+
+# Simulação do estado dos 4 servidores
+# Dictionary para guardar estado: {1: {'status': 'idle', 'job_id': None}, ...}
+server_states = {i: {'status': 'idle', 'job_id': None} for i in range(1, NUM_SERVERS + 1)}
+
+def send_heartbeat_for_slot(slot_id):
+    """Envia heartbeat para um slot especifico"""
+    worker_name = f"{HOSTNAME}-{slot_id}"
+    state = server_states[slot_id]
+    
+    try:
+        payload = {
+            "hostname": worker_name,
+            "status": state['status'],
+            "current_job_id": state['job_id'],
+            "meta": {"type": "slot", "parent": HOSTNAME}
+        }
+        
+        response = requests.post(f"{API_URL}/workers/heartbeat", json=payload, timeout=5)
+        data = response.json()
+        
+        # Se receber comando de restart para ESSE slot específico
+        if data.get("command") == "restart":
+            print(f"[{worker_name}] Recebido comando de RESTART. Reiniciando slot...")
+            # Aqui você reiniciaria apenas a thread/processo desse slot
+            # Ou reinicia tudo se preferir:
+            # restart_program()
+            
+    except Exception as e:
+        print(f"[{worker_name}] Erro heartbeat: {e}")
+
+def heartbeat_loop():
+    """Loop que envia heartbeats de todos os slots a cada 10s"""
+    while True:
+        for i in range(1, NUM_SERVERS + 1):
+            send_heartbeat_for_slot(i)
+        time.sleep(10)
+
+def main():
+    print(f"Iniciando Gerenciador de Workers: {HOSTNAME} com {NUM_SERVERS} slots.")
+    
+    # Inicia a thread de heartbeats em paralelo com o processamento
+    hb_thread = threading.Thread(target=heartbeat_loop, daemon=True)
+    hb_thread.start()
+    
+    # Seu loop principal de gerenciamento de jobs
+    while True:
+        # Exemplo: Atribuir jobs aos slots livres
+        # for i in range(1, NUM_SERVERS + 1):
+        #    if server_states[i]['status'] == 'idle':
+        #        job = buscar_job_no_banco()
+        #        if job:
+        #            server_states[i]['status'] = 'processing'
+        #            server_states[i]['job_id'] = job['id']
+        #            iniciar_processamento(i, job)
+        
+        time.sleep(1)
+
+if __name__ == "__main__":
+    main()
+```
+
+### O que acontece no Painel Web?
+Ao rodar esse script:
+1.  Aparecerão 4 cards no painel: `SeuPC-1`, `SeuPC-2`, `SeuPC-3`, `SeuPC-4`.
+2.  Se o script principal cair (fechar), **todos os 4** ficarão "Offline" após 1 minuto (pois os heartbeats param).
+3.  Se um slot pegar um job, o card correspondente mudará para "Processando" (azul).
+4.  Se clicar em "Reiniciar" no card `SeuPC-2`, apenas aquele slot receberá o comando (você pode tratar isso no código para reiniciar só aquela thread ou o script todo).

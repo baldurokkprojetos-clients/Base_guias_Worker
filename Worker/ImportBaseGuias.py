@@ -3,6 +3,7 @@ import time
 import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -10,6 +11,8 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException,
 
 from bs4 import BeautifulSoup
 import html
+import psutil
+import urllib3
 
 from sqlalchemy.orm import Session
 from database import SessionLocal
@@ -19,6 +22,7 @@ from models import Log
 class UnimedScraper:
     def __init__(self, db: Session = None):
         self.driver = None
+        self._owned_pids = []
         self.username = os.environ.get("SGUCARD_LOGIN", "REC2209525")
         self.password = os.environ.get("SGUCARD_PASSWORD", "Unimed2026@")
         self.headless = os.environ.get("SGUCARD_HEADLESS", "false").lower() == "true"
@@ -64,6 +68,8 @@ class UnimedScraper:
             return parts[0], parts[1], parts[2], parts[3], parts[4]
 
     def start_driver(self):
+        import urllib3
+
         chrome_options = Options()
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_argument("--no-sandbox")
@@ -73,22 +79,108 @@ class UnimedScraper:
         chrome_options.add_argument("--disable-setuid-sandbox")
         chrome_options.add_argument("--incognito")
         chrome_options.add_argument("--no-first-run")
-        
+        chrome_options.add_argument("--disable-extensions")
+
         # Desativar pop-up "Mude sua senha" do gerenciador de senhas do Google
         chrome_options.add_experimental_option("prefs", {
             "credentials_enable_service": False,
             "profile.password_manager_enabled": False
         })
-        
+
         if self.headless:
             chrome_options.add_argument("--headless")
-        
-        self.driver = webdriver.Chrome(options=chrome_options)
+
+        service = Service()
+        self.driver = webdriver.Chrome(service=service, options=chrome_options, keep_alive=False)
         self.driver.maximize_window()
 
+        # ── Fail-fast: zerar retries internos do Selenium ────────────────────
+        # Sem isso, quando ChromeDriver morre, urllib3 retenta 3x (~30s perdidos)
+        # Com Retry(total=0), falha na PRIMEIRA tentativa → detecção instantânea
+        self.driver.command_executor._conn = urllib3.PoolManager(
+            timeout=urllib3.Timeout(connect=10, read=120),
+            retries=urllib3.util.Retry(total=0),
+        )
+        self.driver.set_page_load_timeout(120)
+        self.driver.set_script_timeout(60)
+        self._track_driver_processes()
+
+    def _track_driver_processes(self):
+        """Rastreia os PIDs do chromedriver e dos chromes filhos criados por este driver."""
+        self._owned_pids = []
+        try:
+            chromedriver_pid = self.driver.service.process.pid
+            self._owned_pids.append(chromedriver_pid)
+            for child in psutil.Process(chromedriver_pid).children(recursive=True):
+                self._owned_pids.append(child.pid)
+        except Exception:
+            pass
+
+    def kill_owned_processes(self):
+        """Mata APENAS os processos (chromedriver/chrome) criados por este scraper.
+        Escopo restrito aos PIDs rastreados — nunca toca em processos de outros workers."""
+        for pid in self._owned_pids or []:
+            try:
+                proc = psutil.Process(pid)
+                name = (proc.name() or "").lower()
+                # Validar nome antes de matar: PID pode ter sido reciclado
+                if "chromedriver" in name or "chrome" in name:
+                    proc.kill()
+            except psutil.NoSuchProcess:
+                pass
+            except Exception:
+                pass
+        self._owned_pids = []
+
+    def _chromedriver_pid_alive(self) -> bool:
+        """Checagem local (sem HTTP) se o processo chromedriver rastreado existe.
+        Sem rastreamento (driver legado), assume vivo e deixa o health-check HTTP decidir."""
+        if not self._owned_pids:
+            return True
+        try:
+            return psutil.Process(self._owned_pids[0]).is_running()
+        except psutil.NoSuchProcess:
+            return False
+        except Exception:
+            return True
+
     def close_driver(self):
+        """Fecha o WebDriver de forma segura e anula a referência."""
         if self.driver:
-            self.driver.quit()
+            try:
+                self.driver.quit()
+            except Exception:
+                pass
+            finally:
+                self.driver = None
+        # Garantia: mata chromedriver/chrome que sobreviveram ao quit() travado
+        # (escopo restrito aos PIDs deste scraper).
+        self.kill_owned_processes()
+
+    def is_driver_alive(self) -> bool:
+        """Verifica se o ChromeDriver ainda responde.
+        Checa primeiro o PID localmente (instantâneo, sem HTTP) e só faz o
+        health-check HTTP se o processo ainda existir."""
+        if not self.driver:
+            return False
+        if not self._chromedriver_pid_alive():
+            return False
+        try:
+            self.driver.window_handles
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_connection_error(exc: Exception) -> bool:
+        """True se a exceção indica que o processo chromedriver morreu
+        (conexão recusada na porta local do driver)."""
+        if isinstance(exc, (ConnectionError, urllib3.exceptions.MaxRetryError)):
+            return True
+        msg = str(exc)
+        return ("Max retries exceeded" in msg
+                or "WinError 10061" in msg
+                or "Connection refused" in msg)
 
     def login(self):
         if not self.driver:
@@ -120,6 +212,10 @@ class UnimedScraper:
     def process_carteirinha(self, carteirinha, job_id=None, carteirinha_db_id=None):
         # Returns list of guias dicts
         self.log(f"Processing carteirinha: {carteirinha}", job_id=job_id, carteirinha_id=carteirinha_db_id)
+        
+        # Validar que o driver está vivo antes de operar
+        if not self.is_driver_alive():
+            raise Exception("Driver WebDriver inativo. Reinicialização necessária.")
         
         handles = self.driver.window_handles
         if len(handles) > 1:
@@ -253,6 +349,10 @@ class UnimedScraper:
             self.log("Starting scraping loop...", job_id=job_id, carteirinha_id=carteirinha_db_id)
             
             while True:
+                # Guard: verificar driver a cada iteração do loop de paginação
+                if not self.is_driver_alive():
+                    self.log("Driver morreu durante scraping. Abortando loop.", level="ERROR", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                    raise Exception("Driver WebDriver morreu durante o scraping.")
                 try:
                     # Re-find table elements on each iteration/page
                     DataTable = self.driver.find_element(By.XPATH, '//*[@id="conteudo-submenu"]/table[2]')
@@ -465,6 +565,10 @@ class UnimedScraper:
                                          self.driver.back() # Try browser back? or just loop
                                 except Exception as inner_e:
                                     self.log(f"Error extracting details: {inner_e}", level="ERROR", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                    # Se driver morreu, propagar imediatamente
+                                    # (erro de conexão = chromedriver morto, sem depender do health-check HTTP)
+                                    if self._is_connection_error(inner_e) or not self.is_driver_alive():
+                                        raise
                                     # Try to recover navigation
                                     try:
                                         self.driver.execute_script("window.history.go(-1)")
@@ -472,6 +576,9 @@ class UnimedScraper:
 
                         except Exception as row_e:
                             self.log(f"Error processing row {idx}: {row_e}", level="ERROR", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                            # Se driver morreu, abortar loop imediatamente em vez de repetir erro
+                            if self._is_connection_error(row_e) or not self.is_driver_alive():
+                                raise Exception(f"Driver WebDriver morreu na row {idx}. Abortando.")
                             continue
 
                     # Pagination
@@ -486,10 +593,18 @@ class UnimedScraper:
 
                 except Exception as table_e:
                     self.log(f"Error validating table loop: {table_e}", level="ERROR", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                    # Driver morto NÃO pode ser mascarado como sucesso (break
+                    # retornaria dados parciais e o job seria marcado como OK)
+                    if self._is_connection_error(table_e) or not self.is_driver_alive():
+                        raise
                     break
             
-            self.driver.close()
-            self.driver.switch_to.window(self.driver.window_handles[0])
+            # Fechar popup de forma segura (driver pode estar morto)
+            try:
+                self.driver.close()
+                self.driver.switch_to.window(self.driver.window_handles[0])
+            except Exception:
+                self.log("Popup já fechada ou driver indisponível.", level="WARNING", job_id=job_id, carteirinha_id=carteirinha_db_id)
             
             tipo_json = "All Sucess"
             if any(val.get("Vinculo_prestador") != "Guia Válida" for val in valida_guias.values()):
@@ -512,9 +627,13 @@ class UnimedScraper:
 
         except Exception as e:
             self.log(f"Error processing carteirinha: {e}", level="ERROR", job_id=job_id, carteirinha_id=carteirinha_db_id)
-            if len(self.driver.window_handles) > 1:
-                self.driver.close()
-                self.driver.switch_to.window(self.driver.window_handles[0])
+            # Cleanup seguro: driver pode estar morto
+            try:
+                if self.is_driver_alive() and len(self.driver.window_handles) > 1:
+                    self.driver.close()
+                    self.driver.switch_to.window(self.driver.window_handles[0])
+            except Exception:
+                pass
             raise e
 
 # Main execution if run directly

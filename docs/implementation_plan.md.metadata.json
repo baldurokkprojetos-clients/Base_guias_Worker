@@ -1,0 +1,5 @@
+{
+  "artifactType":  "ARTIFACT_TYPE_IMPLEMENTATION_PLAN",
+  "summary":  "Implementation plan for Base Guias Unimed, including Database Schema, API (FastAPI), Worker (Python), and Frontend (React/Vite) details.",
+  "updatedAt":  "2026-01-10T00:00:48.766318200Z"
+}

@@ -1,0 +1,235 @@
+# =============================================================================
+# PROMPT DE INTEGRAÇÃO — CLMF (Clínica Larissa Martins Ferreira)
+# Sistema: abalarissamartinsferreira.com.br
+# Versão: 1.0.0  |  Data: 2026-05-17
+# =============================================================================
+#
+# OBJETIVO
+# Integrar o convênio "CLMF" ao worker existente para automatizar a gravação
+# de Relatórios Clínicos Mensais (RC) no sistema da clínica via web scraping,
+# seguindo exatamente a mesma arquitetura do projeto Agenda_hub_MultiConv.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# SEÇÃO 1 — CONFIGURAÇÃO DO CONVÊNIO
+# ─────────────────────────────────────────────────────────────────────────────
+convenio:
+  nome: "CLMF"
+  descricao: "Clínica Larissa Martins Ferreira — Portal próprio"
+  url_portal: "https://abalarissamartinsferreira.com.br"
+  tipo_job: "clmf_atualizar_rc"   # campo rotina/job_type — diferencia do job Unimed
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEÇÃO 2 — CREDENCIAIS (salvas na tabela user_convenios)
+# ─────────────────────────────────────────────────────────────────────────────
+credenciais:
+  login: "diogomat11@hotmail.com"
+  senha: "Arju2020@"             # será criptografada antes de persistir no BD
+  # user_id  → ligado ao usuário cadastrado no sistema (tabela users)
+  # id_convenio → id do registro CLMF na tabela convenios
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEÇÃO 3 — OPERAÇÕES DO SCRAPER
+# ─────────────────────────────────────────────────────────────────────────────
+operacoes:
+
+  # ── OP0: LOGIN ────────────────────────────────────────────────────────────
+  - id: OP0_Login
+    descricao: "Autenticação no portal CLMF"
+    params_entrada:
+      - login
+      - senha
+    fluxo:
+      - acao: navigate
+        url: "https://abalarissamartinsferreira.com.br/"
+      - acao: fill
+        selector: 'name="user_email"'
+        valor: "{login}"
+        metodo: clear_then_sendkeys
+      - acao: fill
+        selector: 'name="user_password"'
+        valor: "{senha}"
+        metodo: clear_then_sendkeys
+      - acao: click
+        selector: 'xpath=/html/body/div[1]/div/form/button'
+      - acao: wait_for_element
+        selector: 'title="Ver CLIENTES"'
+        descricao: "Aguarda elemento de clientes — sinal que login foi concluído"
+      - acao: capture_session
+        descricao: "Captura cookies e sessão após login para reúso em OPs seguintes"
+
+    logica:
+      reuso_sessao: true
+      descricao: >
+        Antes de cada job, verificar se a sessão ainda está ativa.
+        Se elemento title="Ver CLIENTES" estiver visível, pular login.
+        Caso contrário, re-autenticar.
+
+  # ── OP1: ATUALIZAR RELATÓRIO CLÍNICO (RC) ────────────────────────────────
+  - id: OP1_AtualizarRC
+    descricao: "Grava o Relatório Clínico Mensal (RC) e faz download do PDF"
+    params_entrada:
+      - id_paciente
+      - id_profissional
+      - AbrevEsp          # ex: "PSI", "FONO", "TO"
+      - id_especialidade  # código interno do sistema
+      - data_RC           # formato dd/MM/yyyy (do CSV); converter para yyyy-MM-dd
+      - caminho_pasta     # caminho local de destino do PDF
+      - nome_padrao       # nome final do arquivo PDF
+      - carteira          # número da carteira do paciente
+
+    fluxo:
+
+      # PASSO 1 — Navegar ao prontuário
+      - acao: navigate
+        url: "https://abalarissamartinsferreira.com.br/prontuarios/prontuario/{id_paciente}"
+
+      # PASSO 2 — Extrair dados da página
+      - acao: extract
+        campo: nome_paciente
+        selector: 'span.crumb'
+        transform:
+          - strip
+          - url_encode           # "PEDRO OLIVEIRA" → "PEDRO%20OLIVEIRA"
+
+      - acao: extract
+        campo: carteirinha_clean
+        selector: 'id="amil_client_carteirinha"'
+        attribute: value
+        transform:
+          - remove_spaces
+          - remove_dots
+          - remove_dashes
+
+      - acao: extract
+        campo: justificativa
+        selector: 'id="ipasgo_justificativa_periodo_tratamento"'
+        transform:
+          - strip
+          - url_encode
+
+      - acao: extract
+        campo: evolucao_ipasgo
+        selector: 'id="ipasgo_evolucao_paciente"'
+        transform:
+          - strip
+          - url_encode
+
+      # PASSO 3 — Gravar RC via POST AJAX
+      - acao: http_post
+        url: "https://abalarissamartinsferreira.com.br/_ajax/RelatorioMensalIpasgo.ajax.php"
+        content_type: "application/x-www-form-urlencoded"
+        body:
+          callback: "RelatorioMensalIpasgo"
+          callback_action: "gravar"
+          arr_relatorio[0][ipasgo_id]: "2"
+          arr_relatorio[0][ipasgo_profissional_atendimento]: "{id_especialidade}"
+          arr_relatorio[0][ipasgo_justificativa_periodo_tratamento]: "{justificativa}"
+          arr_relatorio[0][ipasgo_evolucao_paciente]: "{evolucao_ipasgo}"
+          arr_relatorio[0][ipasgo_data]: "{data_RC_iso}"  # formato yyyy-MM-dd
+          arr_relatorio[0][client_id]: "{id_paciente}"
+          arr_relatorio[0][user_id]: "{id_profissional}"
+
+        exemplo_encoded: >
+          callback=RelatorioMensalIpasgo&callback_action=gravar
+          &arr_relatorio%5B0%5D%5Bipasgo_id%5D=2
+          &arr_relatorio%5B0%5D%5Bipasgo_profissional_atendimento%5D=1
+          &arr_relatorio%5B0%5D%5Bipasgo_justificativa_periodo_tratamento%5D=In%C3%ADcio+das+terapias...
+          &arr_relatorio%5B0%5D%5Bipasgo_evolucao_paciente%5D=In%C3%ADcio+de+tratamento.%0A
+          &arr_relatorio%5B0%5D%5Bipasgo_data%5D=2026-05-02
+          &arr_relatorio%5B0%5D%5Bclient_id%5D=3028
+          &arr_relatorio%5B0%5D%5Buser_id%5D=772
+
+      # PASSO 4 — Montar URL de download do PDF
+      - acao: build_url
+        campo: pdf_url
+        template: >
+          https://abalarissamartinsferreira.com.br/uploads/PDFs/RC-{carteirinha_clean}-{nome_paciente}-{AbrevEsp}.pdf
+        observacao: >
+          Ex.: RC-667392764-PEDRO%20OLIVEIRA%20DO%20AMARAL-PSI.pdf
+
+      # PASSO 5 — Baixar e salvar PDF
+      - acao: download_file
+        url: "{pdf_url}"
+        destino: "{caminho_pasta}/{nome_padrao}"
+        pre_check:
+          descricao: >
+            Se já existir um arquivo com o nome_padrao no caminho_pasta,
+            apagá-lo antes de baixar o novo.
+          acao: delete_if_exists
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEÇÃO 4 — MODELO DE JOB (tabela jobs)
+# ─────────────────────────────────────────────────────────────────────────────
+job_model:
+  rotina: "clmf_atualizar_rc"     # valor no campo rotina/tipo — identifica convênio+operação
+  params_json:                     # armazenado no campo params (JSONB)
+    id_paciente: int
+    paciente: str
+    id_profissional: int
+    AbrevEsp: str                  # PSI | FONO | TO
+    id_especialidade: int
+    data_RC: str                   # "dd/MM/yyyy" — converter na hora de usar
+    caminho_pasta: str
+    nome_padrao: str
+    carteira: str
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEÇÃO 5 — SCRIPT DE CARGA DE JOBS (relacao_jobs_clmf.csv)
+# ─────────────────────────────────────────────────────────────────────────────
+script_carga:
+  arquivo_origem: "relacao_jobs_clmf.csv"
+  separador: ";"
+  encoding: "utf-8"
+  colunas_csv:
+    - id_Paciente
+    - paciente
+    - "Id Profissional"
+    - AbrevEsp
+    - carteira
+    - caminho_pasta
+    - id_especialidade
+    - nome_padrao
+    - data_RC
+
+  mapeamento_para_job_params:
+    id_paciente: id_Paciente
+    paciente: paciente
+    id_profissional: "Id Profissional"
+    AbrevEsp: AbrevEsp
+    carteira: carteira
+    caminho_pasta: caminho_pasta
+    id_especialidade: id_especialidade
+    nome_padrao: nome_padrao
+    data_RC: data_RC
+
+  comportamento:
+    - buscar_ou_criar_carteirinha: >
+        Busca na tabela carteirinhas pelo campo carteira.
+        Se não existir, cria com: carteirinha=carteira, paciente=paciente,
+        id_paciente=id_Paciente, id_convenio=<id_clmf>.
+    - criar_job: >
+        Cria registro na tabela jobs com:
+        rotina = "clmf_atualizar_rc"
+        status = "pending"
+        params = {json com campos acima}
+        carteirinha_id = id da carteirinha criada/encontrada
+    - idempotencia: >
+        Verificar se já existe job pending/processing com mesma carteirinha_id
+        + rotina + data_RC. Se existir, não duplicar.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEÇÃO 6 — TAREFAS DE IMPLANTAÇÃO (checklist)
+# ─────────────────────────────────────────────────────────────────────────────
+implantacao:
+  backend:
+    - "Migration 0028: Seed convenio CLMF na tabela convenios"
+    - "Migration 0029: Criar tabela user_convenios (login, senha_criptografada) — padrão Agenda_hub_MultiConv"
+    - "Migration 0030: Adicionar campo rotina na tabela jobs (se não existir)"
+    - "Atualizar models.py: adicionar UserConvenio, campo rotina em Job, relações"
+    - "Criar script scripts/seed_clmf_jobs.py para importar relacao_jobs_clmf.csv"
+
+  worker:
+    - "Criar scraper/clmf_scraper.py com CLMFScraper (herda padrão UnimedScraper)"
+    - "Atualizar server.py: roteamento por job.rotina → scraper correto"
+    - "Atualizar dispatcher.py: passar params do job ao call_server"
+    - "Criar server_clmf.py (ou adicionar rota /process_job_clmf no server.py atual)"
