@@ -252,11 +252,16 @@ def _process_job_clmf_evolucao(job: JobRequest):
 
             result = clmf_scraper.imprimir_evolucao(params)
             last_activity_time = datetime.now()
-            return {
+            envelope = {
                 "status": result.get("status", "error"),
                 "data": result,
                 "carteirinha_id": job.carteirinha_id,
             }
+            # Propaga a mensagem de falha (ex.: 'Falha no login antes de OP2') para o
+            # dispatcher registra-la — sem isso o log virava 'Unknown error from server'.
+            if envelope["status"] != "success" and result.get("message"):
+                envelope["message"] = result["message"]
+            return envelope
         except Exception as e:
             _log_error(job.job_id, job.carteirinha_id, f"CLMF Evolucao Server Crash: {e}")
             try:
