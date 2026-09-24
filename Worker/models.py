@@ -2,7 +2,7 @@
 Independent models for Worker
 Mirrors the backend models for tables the Worker needs access to
 """
-from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey, Text, BigInteger
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -89,3 +89,45 @@ class Procedimento(Base):
     status = Column(Text, default="ativo")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class EvolucaoItem(Base):
+    """OP2 ImprimirEvolucao — resultado por linha conciliada (fonte do export de status).
+
+    Espelho do backend/models.py; o scraper persiste aqui (self-persist) durante o
+    processamento — a tabela é a fonte da verdade do export.
+    """
+    __tablename__ = "evolucao_itens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    lote = Column(Text, index=True)
+    id_paciente = Column(Integer, index=True)
+    nome_paciente = Column(Text)
+    guia = Column(Text)
+    data_exec = Column(Date, index=True)
+    profissional_id = Column(Integer)          # ID_prof da planilha
+    terapia = Column(Text)                     # coluna Terapia (nome)
+    profissao_id = Column(Integer, nullable=True)
+    hora_inicial = Column(Text)                # "0700"
+    status = Column(Text, nullable=False, default="PENDENTE", index=True)
+    motivo = Column(Text, nullable=True)
+    ids_conciliados = Column(JSONB, nullable=True)
+    pdf_path = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    job_rel = relationship("Job")
+
+
+class EvolucaoClaim(Base):
+    """OP2 ImprimirEvolucao — reserva atômica de candidato do portal (UNIQUE fluxo+item)."""
+    __tablename__ = "evolucao_claims"
+
+    id = Column(Integer, primary_key=True, index=True)
+    fluxo = Column(Text, nullable=False)               # 'aba' | 'evolution'
+    portal_item_id = Column(BigInteger, nullable=False)
+    job_id = Column(Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    job_rel = relationship("Job")

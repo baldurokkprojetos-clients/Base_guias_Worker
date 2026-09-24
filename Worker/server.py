@@ -154,10 +154,18 @@ def process_job(job: JobRequest):
     global unimed_scraper, clmf_scraper, last_activity_time
 
     # ── Roteamento por rotina ──────────────────────────────────────────────
+    # Fail-fast: rotina desconhecida NUNCA cai no scraper Unimed (evita que um
+    # worker desatualizado processe jobs de outra rotina pelo fluxo errado).
     if job.rotina == "clmf_atualizar_rc":
         return _process_job_clmf(job)
-    else:
+    elif job.rotina == "clmf_imprimir_evolucao":
+        return _process_job_clmf_evolucao(job)
+    elif not job.rotina:
         return _process_job_unimed(job)
+    else:
+        msg = f"Rotina desconhecida '{job.rotina}' — server desatualizado para esta rotina?"
+        print(f">>> {msg}")
+        return {"status": "error", "message": msg, "carteirinha_id": job.carteirinha_id}
 
 
 def _ensure_driver(scraper, scraper_name: str, needs_login: bool = True) -> str | None:
@@ -216,9 +224,59 @@ def _process_job_clmf(job: JobRequest):
             return {"status": "error", "message": str(e), "carteirinha_id": job.carteirinha_id}
 
 
+def _process_job_clmf_evolucao(job: JobRequest):
+    """Processa job da OP2 ImprimirEvolucao (rotina clmf_imprimir_evolucao).
+
+    Mesmo molde de _process_job_clmf: job inteiro sob driver_lock, driver
+    garantido com login, reset em falha. A OP2 faz login sob demanda (lazy),
+    persiste o resultado por item em evolucao_itens e pode processar jobs
+    irmãos do mesmo paciente (afinidade) dentro do mesmo request.
+    """
+    global clmf_scraper, last_activity_time
+
+    if not clmf_scraper:
+        raise HTTPException(status_code=503, detail="CLMFScraper não inicializado")
+
+    with driver_lock:
+        err = _ensure_driver(clmf_scraper, "CLMF", needs_login=False)
+        if err:
+            return {"status": "error", "message": err, "carteirinha_id": job.carteirinha_id}
+
+        last_activity_time = datetime.now()
+
+        try:
+            params = dict(job.params or {})
+            params["job_id"] = job.job_id
+            # URL deste server (afinidade marca locked_by nos jobs irmãos que reivindicar)
+            params["server_url"] = f"http://127.0.0.1:{os.environ.get('PORT', '8010')}"
+
+            result = clmf_scraper.imprimir_evolucao(params)
+            last_activity_time = datetime.now()
+            return {
+                "status": result.get("status", "error"),
+                "data": result,
+                "carteirinha_id": job.carteirinha_id,
+            }
+        except Exception as e:
+            _log_error(job.job_id, job.carteirinha_id, f"CLMF Evolucao Server Crash: {e}")
+            try:
+                clmf_scraper.close_driver()
+            except Exception:
+                pass
+            return {"status": "error", "message": str(e), "carteirinha_id": job.carteirinha_id}
+
+
 def _process_job_unimed(job: JobRequest):
     """Processa job do convênio Unimed via UnimedScraper (legado)."""
     global unimed_scraper, last_activity_time
+
+    # Guarda: job de evoluções chegando aqui significa rotina ausente no payload
+    # (dispatcher desatualizado) — falhar explícito em vez de raspar a âncora.
+    if job.carteirinha == "EVOLUCOES-CLMF":
+        msg = ("Job de evoluções (âncora EVOLUCOES-CLMF) roteado ao scraper Unimed — "
+               "rotina ausente no payload (dispatcher desatualizado?)")
+        _log_error(job.job_id, job.carteirinha_id, msg)
+        return {"status": "error", "message": msg, "carteirinha_id": job.carteirinha_id}
 
     if not unimed_scraper:
         raise HTTPException(status_code=503, detail="Scraper não inicializado")
