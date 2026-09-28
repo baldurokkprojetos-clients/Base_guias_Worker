@@ -237,7 +237,11 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
             except: pass
 
             
-            resp = requests.post(f"{url}/process_job", json=payload, timeout=300)
+            # Evoluções CLMF: job com vários itens × navegação no portal passa
+            # fácil de 5 min. Com timeout=300 o dispatcher marcava 'error' com
+            # os itens já concluídos OK pelo server (o POST abandonado não
+            # cancela o trabalho do lado de lá) — 200+ falsos erros por lote.
+            resp = requests.post(f"{url}/process_job", json=payload, timeout=900)
             
             try:
                 data = resp.json()
