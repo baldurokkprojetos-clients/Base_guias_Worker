@@ -170,7 +170,8 @@ def parse_candidatos(html: str, row_class: str) -> list[dict]:
 
 
 def selecionar_candidatos(candidatos: list[dict], usados: set, data_iso: str,
-                          terapia_norm: str, prof_norm: str | None, n: int) -> list[dict]:
+                          terapia_norm: str, prof_norm: str | None, n: int,
+                          priorizar_vazios: bool = True) -> list[dict]:
     """Seleção em camadas (função pura, sem I/O):
 
     1. data == dataExec E terapia == terapia E profissional == canônico(ID_prof)
@@ -179,6 +180,12 @@ def selecionar_candidatos(candidatos: list[dict], usados: set, data_iso: str,
     4. quaisquer outras datas
     Dentro de cada camada: primeiro os de campos vazios (novaData/horaInicial/
     horaFinal), depois os demais; ordem estável por id.
+
+    priorizar_vazios=False (REPROCESSAMENTO): candidatos com dados já
+    preenchidos ficam em igualdade com os vazios — o pool restante de uma
+    primeira execução é majoritariamente preenchido e a preferência por vazios
+    gerava 'candidatos insuficientes' artificial. `usados` já garante que
+    itens consumidos pelo próprio job nunca sejam reoferecidos.
     """
     def sort_key(c):
         mesma_data = c["data_iso"] == data_iso
@@ -192,7 +199,9 @@ def selecionar_candidatos(candidatos: list[dict], usados: set, data_iso: str,
             tier = 2
         else:
             tier = 3
-        return (tier, 0 if c["vazio"] else 1, c["id"])
+        if priorizar_vazios:
+            return (tier, 0 if c["vazio"] else 1, c["id"])
+        return (tier, c["id"])
 
     pool = [c for c in candidatos if c["id"] not in usados]
     pool.sort(key=sort_key)
@@ -902,7 +911,8 @@ class CLMFScraper:
 
     def _selecionar_e_reservar(self, db, job_id: int, fluxo: str, candidatos: list[dict],
                                usados: set, data_iso: str, terapia_norm: str,
-                               prof_norm: str | None, n: int) -> list[dict]:
+                               prof_norm: str | None, n: int,
+                               priorizar_vazios: bool = True) -> list[dict]:
         """Seleção em camadas + reserva atômica. Só retorna com N completos;
         reservas parciais são liberadas (nenhuma gravação é enviada sem fechar N)."""
         reservados: list[dict] = []
@@ -910,7 +920,8 @@ class CLMFScraper:
         while len(reservados) < n:
             falta = n - len(reservados)
             sugeridos = selecionar_candidatos(candidatos, local_usados, data_iso,
-                                              terapia_norm, prof_norm, falta)
+                                              terapia_norm, prof_norm, falta,
+                                              priorizar_vazios=priorizar_vazios)
             if not sugeridos:
                 break
             progresso = False
@@ -1082,7 +1093,23 @@ class CLMFScraper:
 
         itens_db = self._buscar_itens_job(db, job_id)
         cand_evo: list[dict] | None = None   # fallback lazy (1 fetch por job)
-        usados: set[int] = set()             # ids consumidos neste job (claims cobrem cross-job)
+
+        # Candidatos JÁ consumidos por ESTE job (itens OK de execuções anteriores):
+        # nunca reoferecidos — um item pendente do reprocessamento não pode gravar
+        # uma segunda sessão sobre o mesmo atendimento do portal.
+        from models import EvolucaoClaim
+        usados: set[int] = {r.portal_item_id for r in db.query(EvolucaoClaim).filter(
+            EvolucaoClaim.job_id == job_id)}
+
+        # Reprocessamento (job com itens OK ou claims próprios): candidatos com
+        # dados já preenchidos no portal ficam elegíveis em igualdade com os
+        # vazios — sem isso, o pool majoritariamente preenchido gerava
+        # 'candidatos insuficientes' artificial.
+        reprocessando = any(r.status == "OK" for r in itens_db.values()) or bool(usados)
+        priorizar_vazios = not reprocessando
+        if reprocessando:
+            logger.info(f"  [OP2] Job {job_id} em REPROCESSAMENTO — candidatos "
+                        f"preenchidos habilitados; {len(usados)} id(s) do próprio job excluídos.")
 
         for item in itens:
             guia = str(item["guia"])
@@ -1132,14 +1159,16 @@ class CLMFScraper:
                 # Fluxo primário (aba) → seleção + reserva atômica
                 cand_aba = self._candidatos_fluxo(FLUXO_ABA, id_paciente, data_ini, data_fim)
                 sel = self._selecionar_e_reservar(db, job_id, FLUXO_ABA, cand_aba, usados,
-                                                  data_exec, terapia_norm, prof_norm, n)
+                                                  data_exec, terapia_norm, prof_norm, n,
+                                                  priorizar_vazios=priorizar_vazios)
                 fluxo = FLUXO_ABA
                 if len(sel) < n:
                     if cand_evo is None:
                         cand_evo = self._candidatos_fluxo(FLUXO_EVOLUTION, id_paciente, data_ini, data_fim)
                     sel_evo = self._selecionar_e_reservar(db, job_id, FLUXO_EVOLUTION, cand_evo,
                                                           usados, data_exec, terapia_norm,
-                                                          prof_norm, n)
+                                                          prof_norm, n,
+                                                          priorizar_vazios=priorizar_vazios)
                     if len(sel_evo) == n:
                         sel, fluxo = sel_evo, FLUXO_EVOLUTION
                     else:
