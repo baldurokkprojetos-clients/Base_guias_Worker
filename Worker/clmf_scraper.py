@@ -930,14 +930,20 @@ class CLMFScraper:
     # ─── OP2: gravações e PDF ────────────────────────────────────────────────
 
     @staticmethod
-    def _hora_hhmm_para_request(hora_hhmm: str) -> tuple[str, str]:
-        """"0700" → ("07:00", "08:00")  (inicial, inicial+1h). Edge 23:00 → 00:00 WARN."""
+    def _hora_hhmm_para_request(hora_hhmm: str, incremento_min: int = 60) -> tuple[str, str]:
+        """horaFinal = horaInicial + incremento (minutos).
+
+        "0700"+60 → ("07:00", "08:00"); "0800"+30 → ("08:00", "08:30");
+        "0830"+30 → ("08:30", "09:00"). Edge de virada de dia → 00:xx com WARN.
+        """
         hh, mm = int(hora_hhmm[:2]), int(hora_hhmm[2:])
-        inicial = f"{hh:02d}:{mm:02d}"
-        hf = (hh + 1) % 24
-        if hh == 23:
-            logger.warning("  [OP2] HoraInicial 23:00 — horaFinal virou 00:00 (edge +1h).")
-        return inicial, f"{hf:02d}:{mm:02d}"
+        total = hh * 60 + mm
+        fim = total + int(incremento_min)
+        if fim >= 24 * 60:
+            logger.warning(f"  [OP2] HoraInicial {hh:02d}:{mm:02d} + {incremento_min}min "
+                           f"vira o dia — horaFinal = {fim % (24 * 60) // 60:02d}:{fim % 60:02d}.")
+        fim %= 24 * 60
+        return f"{hh:02d}:{mm:02d}", f"{fim // 60:02d}:{fim % 60:02d}"
 
     def _gravar_candidato(self, fluxo: str, portal_id: int, data_iso: str,
                           hora_ini: str, hora_fim: str):
@@ -1055,6 +1061,10 @@ class CLMFScraper:
         nome_paciente = str(params.get("nomePaciente") or "")
         data_exec = str(params["dataExec"])[:10]           # "YYYY-MM-DD"
         data_ini = str(params.get("dataInicial") or data_exec)[:10]
+        try:
+            incremento_min = int(params.get("incrementoMin") or 60)  # duração da sessão (60=1h, 30=30min)
+        except (TypeError, ValueError):
+            incremento_min = 60
         data_fim = str(params.get("dataFinal") or data_exec)[:10]
         itens = params.get("itens") or []
 
@@ -1148,7 +1158,7 @@ class CLMFScraper:
                                                 data_exec, id_prof, terapia, h, registrar_status,
                                                 profissao_id=profissao_id)
                 for candidato, hora in zip(sel, horas):
-                    hora_ini, hora_fim = self._hora_hhmm_para_request(hora)
+                    hora_ini, hora_fim = self._hora_hhmm_para_request(hora, incremento_min)
                     self._gravar_candidato(fluxo, candidato["id"], data_exec, hora_ini, hora_fim)
                     # invalidação local do cache (reflete o que acabou de ser gravado)
                     candidato["novaData"] = data_exec
