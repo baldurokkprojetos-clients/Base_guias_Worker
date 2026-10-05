@@ -912,9 +912,14 @@ class CLMFScraper:
     def _selecionar_e_reservar(self, db, job_id: int, fluxo: str, candidatos: list[dict],
                                usados: set, data_iso: str, terapia_norm: str,
                                prof_norm: str | None, n: int,
-                               priorizar_vazios: bool = True) -> list[dict]:
+                               priorizar_vazios: bool = True,
+                               ignorar_claims: bool = False) -> list[dict]:
         """Seleção em camadas + reserva atômica. Só retorna com N completos;
-        reservas parciais são liberadas (nenhuma gravação é enviada sem fechar N)."""
+        reservas parciais são liberadas (nenhuma gravação é enviada sem fechar N).
+
+        ignorar_claims=True (REPROCESSO): dispensa a reserva — qualquer candidato
+        da janela é utilizável (inclusive já usado por outros jobs; a gravação
+        sobrescreve o atendimento). Exclusividade mantida apenas in-run (usados)."""
         reservados: list[dict] = []
         local_usados = set(usados)
         while len(reservados) < n:
@@ -926,13 +931,13 @@ class CLMFScraper:
                 break
             progresso = False
             for c in sugeridos:
-                if self._reservar_claim(db, job_id, fluxo, c["id"]):
+                if ignorar_claims or self._reservar_claim(db, job_id, fluxo, c["id"]):
                     reservados.append(c)
                     progresso = True
                 local_usados.add(c["id"])
             if not progresso:
                 break
-        if len(reservados) < n:
+        if len(reservados) < n and not ignorar_claims:
             self._liberar_claims(db, job_id, fluxo, [c["id"] for c in reservados])
             return []
         usados.update(c["id"] for c in reservados)
@@ -1094,22 +1099,18 @@ class CLMFScraper:
         itens_db = self._buscar_itens_job(db, job_id)
         cand_evo: list[dict] | None = None   # fallback lazy (1 fetch por job)
 
-        # Candidatos JÁ consumidos por ESTE job (itens OK de execuções anteriores):
-        # nunca reoferecidos — um item pendente do reprocessamento não pode gravar
-        # uma segunda sessão sobre o mesmo atendimento do portal.
-        from models import EvolucaoClaim
-        usados: set[int] = {r.portal_item_id for r in db.query(EvolucaoClaim).filter(
-            EvolucaoClaim.job_id == job_id)}
-
-        # Reprocessamento (job com itens OK ou claims próprios): candidatos com
-        # dados já preenchidos no portal ficam elegíveis em igualdade com os
-        # vazios — sem isso, o pool majoritariamente preenchido gerava
-        # 'candidatos insuficientes' artificial.
-        reprocessando = any(r.status == "OK" for r in itens_db.values()) or bool(usados)
-        priorizar_vazios = not reprocessando
-        if reprocessando:
-            logger.info(f"  [OP2] Job {job_id} em REPROCESSAMENTO — candidatos "
-                        f"preenchidos habilitados; {len(usados)} id(s) do próprio job excluídos.")
+        # REPROCESSO (job reenfileirado por /evolucoes/reprocessar-pendentes):
+        # itens pendentes podem usar QUALQUER candidato da janela — inclusive
+        # já utilizados por outros jobs/itens (a gravação sobrescreve o
+        # atendimento no portal). Claims são ignorados na seleção; apenas a
+        # exclusividade DENTRO desta execução é mantida (usados in-run).
+        # Candidatos preenchidos ficam em igualdade com os vazios.
+        reprocesso = bool(params.get("reprocesso"))
+        priorizar_vazios = not reprocesso
+        usados: set[int] = set()             # exclusividade apenas nesta execução
+        if reprocesso:
+            logger.info(f"  [OP2] Job {job_id} em REPROCESSO — claims ignorados; "
+                        f"candidatos preenchidos habilitados; itens OK preservados.")
 
         for item in itens:
             guia = str(item["guia"])
@@ -1160,7 +1161,8 @@ class CLMFScraper:
                 cand_aba = self._candidatos_fluxo(FLUXO_ABA, id_paciente, data_ini, data_fim)
                 sel = self._selecionar_e_reservar(db, job_id, FLUXO_ABA, cand_aba, usados,
                                                   data_exec, terapia_norm, prof_norm, n,
-                                                  priorizar_vazios=priorizar_vazios)
+                                                  priorizar_vazios=priorizar_vazios,
+                                                  ignorar_claims=reprocesso)
                 fluxo = FLUXO_ABA
                 if len(sel) < n:
                     if cand_evo is None:
@@ -1168,7 +1170,8 @@ class CLMFScraper:
                     sel_evo = self._selecionar_e_reservar(db, job_id, FLUXO_EVOLUTION, cand_evo,
                                                           usados, data_exec, terapia_norm,
                                                           prof_norm, n,
-                                                          priorizar_vazios=priorizar_vazios)
+                                                          priorizar_vazios=priorizar_vazios,
+                                                          ignorar_claims=reprocesso)
                     if len(sel_evo) == n:
                         sel, fluxo = sel_evo, FLUXO_EVOLUTION
                     else:
