@@ -314,13 +314,27 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
                             logger.error(f"Carteirinha {carteirinha_id} not found in DB during sync.")
                             continue
 
+                        try:
+                            guia_num = str(item.get("numero_guia", "")).strip()
+                        except:
+                            guia_num = str(item.get("numero_guia"))
+
+                        # Guia bloqueada ao prestador entra na base mesmo sem
+                        # procedimento autorizado: o bloqueio é a informação
+                        # relevante e o código lido do hint pode não estar
+                        # vinculado ao convênio.
+                        guia_status = None
+                        if valida_payload and isinstance(valida_payload.get("guias"), dict):
+                            guia_status = valida_payload["guias"].get(guia_num)
+                        is_blocked = bool(guia_status and guia_status.get("Vinculo_prestador") not in (None, "", "Guia Válida"))
+
                         # Check Procedimento table
                         proc_authorized = thread_db.query(Procedimento).filter(
                             Procedimento.id_convenio == cart_db_obj.id_pagamento,
                             Procedimento.codigo_procedimento == code_proc
                         ).first()
-                        
-                        if not proc_authorized:
+
+                        if not proc_authorized and not is_blocked:
                             logger.warning(f"Ignoring guia {item.get('numero_guia')}: Procedure {code_proc} not authorized for convenio {cart_db_obj.id_pagamento}")
                             # Log the skip
                             try:
@@ -328,6 +342,8 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
                                 thread_db.commit()
                             except: pass
                             continue
+                        if not proc_authorized and is_blocked:
+                            logger.info(f"Guia bloqueada {guia_num}: inserindo sem procedimento autorizado ({code_proc})")
                         # Conversion helpers
                         try:
                             qtd_solic_val = int(item.get("qtde_solicitada"))
@@ -338,12 +354,7 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
                             qtd_aut_val = int(item.get("qtde_autorizada"))
                         except:
                             qtd_aut_val = 0
-                            
-                        try:
-                            guia_num = str(item.get("numero_guia", "")).strip()
-                        except:
-                            guia_num = str(item.get("numero_guia"))
-                        
+
                         data_auth_parsed = parse_date(item.get("data_autorizacao"))
                         validade_parsed = parse_date(item.get("validade_senha"))
                         

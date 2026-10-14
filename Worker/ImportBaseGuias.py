@@ -182,6 +182,79 @@ class UnimedScraper:
                 or "WinError 10061" in msg
                 or "Connection refused" in msg)
 
+    # JS que localiza a tabela de terapias pela ESTRUTURA (2ª linha do tbody
+    # com input na 3ª coluna e 6+ colunas), lendo código/quantidades direto
+    # do DOM. Imune à posição do div — o XPath absoluto original
+    # (/html/body/div[1]/div[13]/...) quebrava quando a página de detalhe
+    # renderiza divs extras (ex.: aviso de guia bloqueada ao prestador).
+    _TERAPIA_TABLE_JS = """
+        var tables = document.querySelectorAll('div > table');
+        for (var i = 0; i < tables.length; i++) {
+            var t = tables[i];
+            if (!t.tBodies.length) continue;
+            var rows = t.tBodies[0].rows;
+            if (rows.length < 2) continue;
+            var cells = rows[1].cells;
+            if (cells.length < 6) continue;
+            var inp = cells[2].querySelector('input');
+            if (!inp) continue;
+            return {
+                cod: inp.value || '',
+                solic: (cells[4].textContent || '').trim(),
+                aut: (cells[5].textContent || '').trim()
+            };
+        }
+        return null;
+    """
+
+    def _read_terapia_fields(self):
+        """Lê (codigo, qtde_solicitada, qtde_autorizada) da tabela de terapias
+        da página de detalhe. Retorna (None, None, None) quando a tabela não
+        existe — indício de guia sem itens liberados ao prestador."""
+        try:
+            data = self.driver.execute_script(self._TERAPIA_TABLE_JS)
+            if data:
+                return (data.get("cod") or ""), (data.get("solic") or ""), (data.get("aut") or "")
+        except Exception:
+            pass
+        # Fallback: XPath absoluto original (páginas sem variação de divs)
+        try:
+            cod = self.driver.find_element(By.XPATH, '/html/body/div[1]/div[13]/div/table/tbody/tr[2]/td[3]/input').get_attribute("value")
+            qtde_solic = self.driver.find_element(By.XPATH, '/html/body/div[1]/div[13]/div/table/tbody/tr[2]/td[5]').text.strip()
+            qtde_aut = self.driver.find_element(By.XPATH, '/html/body/div[1]/div[13]/div/table/tbody/tr[2]/td[6]').text.strip()
+            return cod or "", qtde_solic, qtde_aut
+        except Exception:
+            return None, None, None
+
+    def _detect_blocked_message(self):
+        """Captura mensagens de bloqueio exibidas na página de detalhe da guia:
+        o label conhecido (lendo textContent, mesmo oculto) e elementos
+        visíveis com id/classe contendo 'error'. None se nada encontrado."""
+        candidates = []
+        try:
+            el = self.driver.find_element(By.ID, "label_error_redeAtendPrestEspec")
+            txt = (el.get_attribute("textContent") or "").strip()
+            if txt:
+                candidates.append(txt)
+        except Exception:
+            pass
+        try:
+            found = self.driver.execute_script("""
+                var out = [];
+                var els = document.querySelectorAll('[id*="error" i],[class*="error" i]');
+                for (var i = 0; i < els.length; i++) {
+                    var e = els[i];
+                    if (e.offsetParent === null) continue;
+                    var txt = (e.textContent || '').trim();
+                    if (txt && txt.length < 300) out.push(txt);
+                }
+                return out;
+            """)
+            candidates.extend(found or [])
+        except Exception:
+            pass
+        return " | ".join(candidates) if candidates else None
+
     def login(self):
         if not self.driver:
             self.start_driver()
@@ -432,7 +505,14 @@ class UnimedScraper:
 
                                 link_element.click()
                                 time.sleep(3)
-                                
+
+                                # Defaults: se a extração falhar no meio, o except
+                                # ainda consegue registrar a guia com o que houver
+                                new_num_guia = ""
+                                data_auth = ""
+                                senha = ""
+                                data_valid = ""
+
                                 # Extract Details
                                 try:
                                     try:
@@ -533,10 +613,39 @@ class UnimedScraper:
                                         data_auth = self.driver.find_element(By.XPATH, '//*[@id="conteudo-submenu"]/form/table/tbody/tr[4]/td[4]').text
                                         senha = self.driver.find_element(By.XPATH, '//*[@id="conteudo-submenu"]/form/table/tbody/tr[5]/td[2]').text
                                         data_valid = self.driver.find_element(By.XPATH, '//*[@id="CampoValidadeSenha"]').text
-                                        cod_terapia = self.driver.find_element(By.XPATH, '/html/body/div[1]/div[13]/div/table/tbody/tr[2]/td[3]/input').get_attribute("value")
-                                        qtde_solic = self.driver.find_element(By.XPATH, '/html/body/div[1]/div[13]/div/table/tbody/tr[2]/td[5]').text.strip()
-                                        qtde_aut = self.driver.find_element(By.XPATH, '/html/body/div[1]/div[13]/div/table/tbody/tr[2]/td[6]').text.strip()
-                                        
+                                        cod_terapia, qtde_solic, qtde_aut = self._read_terapia_fields()
+
+                                        if not cod_terapia:
+                                            # Tabela de terapias ausente/vazia: guia sem itens
+                                            # liberados ao prestador. Registrar como bloqueada —
+                                            # nunca descartar a guia silenciosamente.
+                                            if not self.is_driver_alive():
+                                                raise Exception("Driver WebDriver morreu durante o scraping.")
+                                            block_msg = self._detect_blocked_message() or \
+                                                "Guia sem itens liberados para execução pelo prestador (tabela de terapias ausente)"
+                                            numero_chave = (guide_numero or new_num_guia or "").strip()
+                                            self.log(f"Guia {numero_chave} sem tabela de terapias: registrando como bloqueada ({block_msg})", level="WARNING", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                            valida_guias[numero_chave] = {
+                                                "codigo_procedimento": guide_codigo,
+                                                "descricao_procedimento": guide_descricao,
+                                                "Vinculo_prestador": block_msg
+                                            }
+                                            collected_data.append({
+                                                "numero_guia": numero_chave,
+                                                "data_autorizacao": data_auth or None,
+                                                "senha": senha or None,
+                                                "validade_senha": data_valid or None,
+                                                "codigo_procedimento": guide_codigo,
+                                                "descricao_procedimento": guide_descricao,
+                                                "qtde_solicitada": 0,
+                                                "qtde_autorizada": 0
+                                            })
+                                            try:
+                                                self.driver.execute_script("window.history.go(-1)")
+                                                time.sleep(1)
+                                            except: pass
+                                            continue
+
                                         guia_data = {
                                             "numero_guia": new_num_guia,
                                             "data_autorizacao": data_auth,
@@ -569,6 +678,28 @@ class UnimedScraper:
                                     # (erro de conexão = chromedriver morto, sem depender do health-check HTTP)
                                     if self._is_connection_error(inner_e) or not self.is_driver_alive():
                                         raise
+                                    # Registrar a guia com o que foi extraído até o erro,
+                                    # em vez de descartá-la silenciosamente (jobs terminavam
+                                    # 'success' perdendo guias bloqueadas).
+                                    fallback_num = (guide_numero or new_num_guia or "").strip()
+                                    if fallback_num and fallback_num not in valida_guias:
+                                        err_brief = str(inner_e).split("Stacktrace:")[0].strip()[:300]
+                                        valida_guias[fallback_num] = {
+                                            "codigo_procedimento": guide_codigo,
+                                            "descricao_procedimento": guide_descricao,
+                                            "Vinculo_prestador": f"Erro na extração dos detalhes: {err_brief}"
+                                        }
+                                        collected_data.append({
+                                            "numero_guia": fallback_num,
+                                            "data_autorizacao": data_auth or None,
+                                            "senha": senha or None,
+                                            "validade_senha": data_valid or None,
+                                            "codigo_procedimento": guide_codigo,
+                                            "descricao_procedimento": guide_descricao,
+                                            "qtde_solicitada": 0,
+                                            "qtde_autorizada": 0
+                                        })
+                                        self.log(f"Guia {fallback_num} registrada com erro de extração (não descartada)", level="WARNING", job_id=job_id, carteirinha_id=carteirinha_db_id)
                                     # Try to recover navigation
                                     try:
                                         self.driver.execute_script("window.history.go(-1)")
