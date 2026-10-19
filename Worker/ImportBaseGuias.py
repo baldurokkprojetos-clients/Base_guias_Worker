@@ -18,6 +18,19 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Log
 
+import unicodedata
+
+
+def normalize_status(text):
+    """Normaliza o texto do status 'Situação' do portal para comparação:
+    remove acentos e ícones/emojis não-ASCII (ex.: '⚠️ Em estudo'), colapsa
+    espaços (incl. &nbsp;) e minúsculas. Captura as variações
+    EM ESTUDO / Em Estudo / Em estudo / em estudo e pequenos ajustes do portal.
+    O texto ORIGINAL é preservado no log/JSON para visualização."""
+    s = unicodedata.normalize("NFKD", text or "")
+    s = s.encode("ascii", "ignore").decode("ascii")
+    return " ".join(s.split()).lower()
+
 # Class to handle Scraping
 class UnimedScraper:
     def __init__(self, db: Session = None):
@@ -448,12 +461,15 @@ class UnimedScraper:
                             # Scroll into view
                             self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", status_span)
 
-                            # Normaliza espaços (incl. &nbsp;/\xa0) e caixa — o portal
-                            # pode exibir "Em Estudo"/"em estudo"/"EM ESTUDO".
+                            # Normalização forte (ícones/acentos/caça/espaços) — o
+                            # portal exibe '⚠️ Em estudo' e pode variar o texto.
                             row_status = " ".join((status_span.text or "").split())
-                            row_status_norm = row_status.lower()
+                            row_status_norm = normalize_status(row_status)
 
-                            if row_status_norm == "em estudo":
+                            # 'estudo' por CONTENÇÃO após normalizar: cobre EM ESTUDO,
+                            # Em Estudo, Em estudo, em estudo, com ícone de aviso ou
+                            # palavras extras, sem quebrar se o portal ajustar o texto.
+                            if "estudo" in row_status_norm:
                                 # ── Guia "Em Estudo" ─────────────────────────────────
                                 # Entra em base_guias apenas se o código for válido p/
                                 # prestador (decisão do dispatcher via tabela procedimentos);
@@ -564,9 +580,10 @@ class UnimedScraper:
                                     "codigo_procedimento": codigo_final,
                                     "descricao_procedimento": guide_descricao,
                                     "Vinculo_prestador": "Em Estudo",
-                                    "status_guia": "Em Estudo"
+                                    "status_guia": "Em Estudo",
+                                    "status_portal": row_status
                                 }
-                                self.log(f"Guia Em Estudo {numero_chave} registrada (codigo={codigo_final or 'n/d'})", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                self.log(f"Guia Em Estudo {numero_chave} registrada (codigo={codigo_final or 'n/d'}, situação portal='{row_status}')", job_id=job_id, carteirinha_id=carteirinha_db_id)
                                 continue
 
                             if row_status_norm != "autorizado":
