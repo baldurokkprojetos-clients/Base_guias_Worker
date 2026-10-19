@@ -516,6 +516,19 @@ class UnimedScraper:
                                     guide_descricao = ""
                                     self.log(f"Failed to extract guide_codigo/descricao: {str(e)}", level="WARNING", job_id=job_id, carteirinha_id=carteirinha_db_id)
 
+                                # Guia Em Estudo costuma vir SEM o hint (HTML_HINT_ITEM)
+                                # — a descrição do procedimento fica exposta na coluna
+                                # "Grupo de execução" (td[9]) da própria linha
+                                # (ex.: "PSICOLOGIA METODO ABA"). Mesmo sem código,
+                                # a descrição é exibida no frame do job.
+                                if not guide_descricao:
+                                    try:
+                                        guide_descricao = " ".join(
+                                            self.driver.find_element(By.XPATH, f'{row_xpath}/td[9]').text.split()
+                                        )
+                                    except Exception:
+                                        pass
+
                                 try:
                                     guide_numero = self.driver.find_element(By.XPATH, f'{row_xpath}/td[4]/a').text.strip()
                                 except:
