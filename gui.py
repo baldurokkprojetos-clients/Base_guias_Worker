@@ -731,10 +731,45 @@ class SystemManagerApp:
 
     # --- Monitoring ---
     
+    def check_dispatcher_alive(self):
+        """Watchdog do dispatcher: se o processo morreu (ex.: self-exit por
+        travamento do loop principal detectado pelo heartbeat), sobe outro
+        automaticamente enquanto o sistema estiver em operação."""
+        if not self.running:
+            return
+        if getattr(self, '_stopping', False):
+            return
+        if not hasattr(self, 'dispatcher_process') or not self.dispatcher_process:
+            return
+        if self.dispatcher_process.is_alive():
+            return
+
+        # Cooldown para não entrar em loop de respawn se o start falhar
+        if time.time() - getattr(self, '_last_dispatcher_respawn', 0) < 30:
+            return
+        self._last_dispatcher_respawn = time.time()
+
+        self.log("Dispatcher died — auto-restarting.", "WARN")
+        try:
+            num_w = self.var_num_servers.get()
+            server_str = ",".join(f"http://127.0.0.1:{8010+i}" for i in range(num_w))
+            d = multiprocessing.Process(
+                target=run_dispatcher,
+                args=(server_str, 15, self.log_queue, self.cmd_queue),
+                daemon=True
+            )
+            d.start()
+            self.processes.append(d)
+            self.dispatcher_process = d
+        except Exception as e:
+            self.log(f"Failed to auto-restart dispatcher: {e}", "ERROR")
+
     def status_monitor_loop(self):
         while True:
             # Always check for remote commands (Wake on LAN style)
             self.check_remote_commands()
+            # Dispatcher morto (watchdog de travamento) → sobe outro
+            self.check_dispatcher_alive()
 
             if not self.running:
                 # Still check DB occasionally if app is open

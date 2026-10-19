@@ -444,11 +444,139 @@ class UnimedScraper:
                             # Re-find element to avoid stale reference
                             row_xpath = f'//*[@id="conteudo-submenu"]/table[2]/tbody/tr[{idx+1}]'
                             status_span = self.driver.find_element(By.XPATH, f'{row_xpath}/td[6]/span')
-                            
+
                             # Scroll into view
                             self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", status_span)
-                            
-                            if status_span.text == "Autorizado":
+
+                            # Normaliza espaços (incl. &nbsp;/\xa0) e caixa — o portal
+                            # pode exibir "Em Estudo"/"em estudo"/"EM ESTUDO".
+                            row_status = " ".join((status_span.text or "").split())
+                            row_status_norm = row_status.lower()
+
+                            if row_status_norm == "em estudo":
+                                # ── Guia "Em Estudo" ─────────────────────────────────
+                                # Entra em base_guias apenas se o código for válido p/
+                                # prestador (decisão do dispatcher via tabela procedimentos);
+                                # código inválido fica só no frame do job (valida_prestador).
+                                # Nunca gera PEI: Vinculo_prestador != 'Guia Válida'
+                                # mantém a guia fora do cálculo do trigger calculate_patient_pei.
+                                date_element = self.driver.find_element(By.XPATH, f'{row_xpath}/td[1]')
+                                date_text = date_element.text.strip()
+                                try:
+                                    guia_date = datetime.datetime.strptime(date_text, "%d/%m/%Y").date()
+                                except:
+                                    guia_date = datetime.datetime.now().date()
+
+                                cutoff_date = datetime.datetime.now().date() - datetime.timedelta(days=270)
+                                if guia_date < cutoff_date:
+                                    self.log(f"Guia date {date_text} is older than limit. Stopping.", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                    self.driver.close()
+                                    self.driver.switch_to.window(self.driver.window_handles[0])
+                                    if not valida_guias:
+                                        tipo_json = None
+                                        valida_guias_out = {}
+                                    else:
+                                        tipo_json = "All Sucess"
+                                        if any(val.get("Vinculo_prestador") != "Guia Válida" for val in valida_guias.values()):
+                                            tipo_json = "Thered"
+                                        valida_guias_out = valida_guias
+                                    return {
+                                        "valida_prestador": {"tipo_json": tipo_json, "guias": valida_guias_out},
+                                        "guias_scraped": collected_data
+                                    }
+
+                                # Código/descrição vêm do hint da própria linha
+                                # (disponível sem abrir o detalhe)
+                                try:
+                                    input_hidden = self.driver.find_element(By.XPATH, f'{row_xpath}//input[@name="HTML_HINT_ITEM"]')
+                                    raw_html = input_hidden.get_attribute("value")
+                                    decoded_html = html.unescape(raw_html)
+                                    soup = BeautifulSoup(decoded_html, "html.parser")
+                                    guide_codigo = soup.find("td", class_="hint-td-cd-item").get_text(strip=True)
+                                    ds_el = soup.find("td", class_="hint-td-ds-item")
+                                    guide_descricao = ds_el.get_text(strip=True).lstrip("- ").strip() if ds_el else ""
+                                except Exception as e:
+                                    guide_codigo = ""
+                                    guide_descricao = ""
+                                    self.log(f"Failed to extract guide_codigo/descricao: {str(e)}", level="WARNING", job_id=job_id, carteirinha_id=carteirinha_db_id)
+
+                                try:
+                                    guide_numero = self.driver.find_element(By.XPATH, f'{row_xpath}/td[4]/a').text.strip()
+                                except:
+                                    guide_numero = ""
+
+                                # Abre o detalhe apenas para enriquecer (senha/datas/
+                                # terapias). Página de guia Em Estudo pode não ter os
+                                # campos — falhar aqui nunca derruba a guia, que segue
+                                # com os dados da própria linha.
+                                new_num_guia = data_auth = senha = data_valid = ""
+                                cod_terapia = ""
+                                qtde_solic = qtde_aut = 0
+                                try:
+                                    link_element = self.driver.find_element(By.XPATH, f'{row_xpath}/td[4]/a')
+                                    link_element.click()
+                                    time.sleep(3)
+                                    if is_element_present(By.XPATH, '//*[@id="Button_Voltar"]'):
+                                        try:
+                                            new_num_guia = self.driver.find_element(By.XPATH, '//*[@id="conteudo-submenu"]/form/table/tbody/tr[3]/td[2]').text
+                                            data_auth = self.driver.find_element(By.XPATH, '//*[@id="conteudo-submenu"]/form/table/tbody/tr[4]/td[4]').text
+                                            senha = self.driver.find_element(By.XPATH, '//*[@id="conteudo-submenu"]/form/table/tbody/tr[5]/td[2]').text
+                                            data_valid = self.driver.find_element(By.XPATH, '//*[@id="CampoValidadeSenha"]').text
+                                        except Exception:
+                                            pass
+                                        try:
+                                            cod_t, q_s, q_a = self._read_terapia_fields()
+                                            if cod_t:
+                                                cod_terapia, qtde_solic, qtde_aut = cod_t, q_s, q_a
+                                        except Exception:
+                                            pass
+                                        try:
+                                            self.driver.find_element(By.XPATH, '//*[@id="Button_Voltar"]').click()
+                                            time.sleep(1)
+                                        except Exception:
+                                            self.driver.back()
+                                    else:
+                                        self.driver.back()
+                                except Exception as est_e:
+                                    self.log(f"Em Estudo detail extraction failed for guia {guide_numero}: {est_e}", level="WARNING", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                    try:
+                                        self.driver.execute_script("window.history.go(-1)")
+                                        time.sleep(1)
+                                    except: pass
+
+                                codigo_final = (cod_terapia or guide_codigo or "").strip()
+                                numero_chave = (guide_numero or new_num_guia or "").strip()
+                                if not numero_chave:
+                                    continue
+
+                                collected_data.append({
+                                    "numero_guia": numero_chave,
+                                    "data_autorizacao": data_auth or None,
+                                    "senha": senha or None,
+                                    "validade_senha": data_valid or None,
+                                    "codigo_procedimento": codigo_final,
+                                    "descricao_procedimento": guide_descricao,
+                                    "qtde_solicitada": qtde_solic or 0,
+                                    "qtde_autorizada": qtde_aut or 0,
+                                    "status": "Em Estudo"
+                                })
+                                valida_guias[numero_chave] = {
+                                    "codigo_procedimento": codigo_final,
+                                    "descricao_procedimento": guide_descricao,
+                                    "Vinculo_prestador": "Em Estudo",
+                                    "status_guia": "Em Estudo"
+                                }
+                                self.log(f"Guia Em Estudo {numero_chave} registrada (codigo={codigo_final or 'n/d'})", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                continue
+
+                            if row_status_norm != "autorizado":
+                                # Demais statuses: ignorados como antes, mas agora
+                                # com log — diagnóstico imediato do que o portal exibiu
+                                # (ex.: status novo não tratado).
+                                self.log(f"Row {idx} com status '{row_status or '(vazio)'}' ignorado.", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                continue
+
+                            if row_status_norm == "autorizado":
                                 date_element = self.driver.find_element(By.XPATH, f'{row_xpath}/td[1]')
                                 date_text = date_element.text.strip()
                                 
@@ -655,7 +783,7 @@ class UnimedScraper:
                                             "descricao_procedimento": guide_descricao,
                                             "qtde_solicitada": qtde_solic,
                                             "qtde_autorizada": qtde_aut,
-                                            "status": "Autorizado"
+                                            "status": row_status
                                         }
                                         collected_data.append(guia_data)
                                         numero_chave = guide_numero or new_num_guia

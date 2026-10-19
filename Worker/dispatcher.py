@@ -180,12 +180,30 @@ def send_heartbeat(status_map, cmd_queue=None, active_workers=None):
     except Exception as e:
         logger.error(f"Heartbeat Loop Error: {e}")
 
-def start_heartbeat_loop(status_map, interval=10, cmd_queue=None, active_workers=None):
+def start_heartbeat_loop(status_map, interval=10, cmd_queue=None, active_workers=None, loop_watchdog=None):
     def loop():
         while True:
             send_heartbeat(status_map, cmd_queue, active_workers)
+
+            # Watchdog anti-congelamento: o loop principal itera a cada ~2s.
+            # Se ele parar de iterar (socket morto, console pausado no Windows,
+            # etc.) este thread continua vivo — detecta o travamento e mata o
+            # processo para o GUI subir outro dispatcher automaticamente.
+            # (Caso real 15/10/2026: loop parado ~10h com heartbeat "idle",
+            # 815 jobs pending nunca consumidos.)
+            if loop_watchdog is not None:
+                stalled_for = time.time() - loop_watchdog.get("last_progress", time.time())
+                if stalled_for > loop_watchdog.get("stall_limit", 900):
+                    try:
+                        with open("dispatcher_stall.log", "a", encoding="utf-8") as f:
+                            f.write(f"{datetime.utcnow().isoformat()} WATCHDOG: main loop stalled "
+                                    f"for {int(stalled_for)}s — exiting for restart (os._exit 87)\n")
+                    except Exception:
+                        pass
+                    os._exit(87)
+
             time.sleep(interval)
-    
+
     t = threading.Thread(target=loop, daemon=True)
     t.start()
 
@@ -208,8 +226,14 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
     server_status_map = {url: {"status": "idle", "last_job": None} for url in servers}
     dispatch_stagger_val = stagger
 
+    # Progresso do loop principal, compartilhado com o thread de heartbeat
+    loop_watchdog = {
+        "last_progress": time.time(),
+        "stall_limit": int(os.environ.get("DISPATCHER_STALL_LIMIT", "900")),  # 15 min
+    }
+
     # Start Heartbeat Thread
-    start_heartbeat_loop(server_status_map, cmd_queue=cmd_queue, active_workers=active_workers)
+    start_heartbeat_loop(server_status_map, cmd_queue=cmd_queue, active_workers=active_workers, loop_watchdog=loop_watchdog)
 
 
 
@@ -326,7 +350,19 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
                         guia_status = None
                         if valida_payload and isinstance(valida_payload.get("guias"), dict):
                             guia_status = valida_payload["guias"].get(guia_num)
-                        is_blocked = bool(guia_status and guia_status.get("Vinculo_prestador") not in (None, "", "Guia Válida"))
+
+                        # Guia "Em Estudo": NÃO é bloqueio — só entra na base com
+                        # código válido na tabela procedimentos; caso contrário fica
+                        # apenas no frame do job (valida_prestador). Nunca gera PEI:
+                        # Vinculo_prestador 'Em Estudo' é ignorado pelo trigger
+                        # calculate_patient_pei (exige LIKE 'Guia V%lida').
+                        is_em_estudo = (
+                            item.get("status") == "Em Estudo"
+                            or bool(guia_status and guia_status.get("status_guia") == "Em Estudo")
+                        )
+                        is_blocked = (not is_em_estudo) and bool(
+                            guia_status and guia_status.get("Vinculo_prestador") not in (None, "", "Guia Válida")
+                        )
 
                         # Check Procedimento table
                         proc_authorized = thread_db.query(Procedimento).filter(
@@ -335,6 +371,13 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
                         ).first()
 
                         if not proc_authorized and not is_blocked:
+                            if is_em_estudo:
+                                logger.info(f"Guia Em Estudo {guia_num}: procedimento {code_proc} não autorizado — apenas exibição no job (fora da base/PEI)")
+                                try:
+                                    thread_db.add(Log(job_id=job_id, carteirinha_id=carteirinha_id, level="INFO", message=f"Guia {guia_num} Em Estudo: procedimento {code_proc} não autorizado — exibida apenas no job."))
+                                    thread_db.commit()
+                                except: pass
+                                continue
                             logger.warning(f"Ignoring guia {item.get('numero_guia')}: Procedure {code_proc} not authorized for convenio {cart_db_obj.id_pagamento}")
                             # Log the skip
                             try:
@@ -490,6 +533,9 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
             status_map[url]["status"] = "idle"
 
     while True:
+        # Sinaliza progresso ao watchdog logo no início da iteração — cobre
+        # inclusive o caminho de falha do SessionLocal (except/continue).
+        loop_watchdog["last_progress"] = time.time()
         try:
             db = SessionLocal()
         except Exception as db_open_err:
@@ -497,7 +543,6 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
             time.sleep(15)
             continue
         try:
-
             # 0. Recover stuck jobs (processing > 15 min)
             recover_stuck_jobs(db)
             
@@ -597,13 +642,20 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
                     # Stagger between assignments to avoid DB spikes
                     time.sleep(1) 
             
-            db.close()
             # If we just assigned jobs, loop quickly. If we hit "No pending jobs", sleep slightly longer.
             time.sleep(2)
-            
+
         except Exception as e:
             logger.error(f"Dispatcher Loop Error: {e}")
             time.sleep(15)
+        finally:
+            # Fecha a sessão SEMPRE — sem isso, cada exceção no meio do loop
+            # vazava uma conexão do pool até esgotar (pool_size+overflow) e
+            # matar o dispatcher definitivamente.
+            try:
+                db.close()
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     run_dispatcher()
