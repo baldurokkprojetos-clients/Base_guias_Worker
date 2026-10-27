@@ -33,6 +33,7 @@ if sys.stderr is None: sys.stderr = FileLogStream("dispatcher_err.log")
 # Use local Worker modules (independent of backend)
 from database import SessionLocal
 from models import Job, BaseGuia, Log, Carteirinha, Procedimento
+from sqlalchemy.exc import IntegrityError
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -403,6 +404,24 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
                         
                         logger.info(f"Parsed values - Guia: {guia_num}, DatAuth: {data_auth_parsed}, Val: {validade_parsed}, QtdSol: {qtd_solic_val}, QtdAut: {qtd_aut_val}")
                         
+                        # Campos sincronizados a cada reprocessamento. updated_at + ativo
+                        # renovam o ciclo de vida da guia (critério de 24h do cron de inativação)
+                        def _apply_guia_fields(target_guia):
+                            target_guia.data_autorizacao = data_auth_parsed
+                            target_guia.senha = item.get("senha")
+                            target_guia.validade = validade_parsed
+                            target_guia.codigo_procedimento = item.get("codigo_procedimento")
+                            target_guia.qtde_solicitada = qtd_solic_val
+                            target_guia.sessoes_autorizadas = qtd_aut_val
+                            target_guia.ativo = True
+                            target_guia.updated_at = datetime.utcnow()
+
+                            # Sync valida_prestador status for this specific guia
+                            if valida_payload and "guias" in valida_payload:
+                                guia_status = valida_payload["guias"].get(guia_num)
+                                if guia_status:
+                                    target_guia.valida_prestador = guia_status
+
                         # UPSERT Logic: Check if exists
                         logger.info("Checking if guia exists in DB...")
                         try:
@@ -414,51 +433,50 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
                         except Exception as db_q_err:
                             logger.error(f"DB Query Failed: {db_q_err}")
                             raise db_q_err
-                        
+
                         if existing_guia:
                             # Update
                             logger.info("Updating existing guia...")
-                            existing_guia.data_autorizacao = data_auth_parsed
-                            existing_guia.senha = item.get("senha")
-                            existing_guia.validade = validade_parsed
-                            existing_guia.codigo_procedimento = item.get("codigo_procedimento")
-                            existing_guia.qtde_solicitada = qtd_solic_val
-                            existing_guia.sessoes_autorizadas = qtd_aut_val
-                            existing_guia.updated_at = datetime.utcnow()
-                            
-                            # Sync valida_prestador status for this specific guia
-                            if valida_payload and "guias" in valida_payload:
-                                guia_status = valida_payload["guias"].get(guia_num)
-                                if guia_status:
-                                    existing_guia.valida_prestador = guia_status
-                            
+                            _apply_guia_fields(existing_guia)
                             count_updated += 1
                         else:
-                            # Insert
+                            # Insert (savepoint: o índice único (carteirinha_id, guia) pode
+                            # rejeitar corrida de insert paralelo — nesse caso converte em update)
                             logger.info(f"Inserting new guia: {guia_num}")
                             try:
-                                new_guia = BaseGuia(
-                                    carteirinha_id=carteirinha_id,
-                                    guia=guia_num,
-                                    data_autorizacao=data_auth_parsed,
-                                    senha=item.get("senha"),
-                                    validade=validade_parsed,
-                                    codigo_procedimento=item.get("codigo_procedimento") or item.get("codigo_terapia"),
-                                    qtde_solicitada=qtd_solic_val,
-                                    sessoes_autorizadas=qtd_aut_val,
-                                    created_at=datetime.utcnow()
-                                )
-                                
-                                # Sync valida_prestador status for this new guia
-                                if valida_payload and "guias" in valida_payload:
-                                    guia_status = valida_payload["guias"].get(guia_num)
-                                    if guia_status:
-                                        new_guia.valida_prestador = guia_status
-                                        
-                                logger.info("BaseGuia object created successfully")
-                                thread_db.add(new_guia)
+                                with thread_db.begin_nested():
+                                    new_guia = BaseGuia(
+                                        carteirinha_id=carteirinha_id,
+                                        guia=guia_num,
+                                        data_autorizacao=data_auth_parsed,
+                                        senha=item.get("senha"),
+                                        validade=validade_parsed,
+                                        codigo_procedimento=item.get("codigo_procedimento") or item.get("codigo_terapia"),
+                                        qtde_solicitada=qtd_solic_val,
+                                        sessoes_autorizadas=qtd_aut_val,
+                                        created_at=datetime.utcnow()
+                                    )
+
+                                    # Sync valida_prestador status for this new guia
+                                    if valida_payload and "guias" in valida_payload:
+                                        guia_status = valida_payload["guias"].get(guia_num)
+                                        if guia_status:
+                                            new_guia.valida_prestador = guia_status
+
+                                    logger.info("BaseGuia object created successfully")
+                                    thread_db.add(new_guia)
                                 logger.info("Added to session, incrementing count")
                                 count_inserted += 1
+                            except IntegrityError as race_err:
+                                logger.warning(f"Guia {guia_num}: insert concorrente detectado ({race_err}); convertendo em update")
+                                existing_guia = thread_db.query(BaseGuia).filter(
+                                    BaseGuia.carteirinha_id == carteirinha_id,
+                                    BaseGuia.guia == guia_num
+                                ).first()
+                                if not existing_guia:
+                                    raise
+                                _apply_guia_fields(existing_guia)
+                                count_updated += 1
                             except Exception as insert_err:
                                 logger.error(f"Failed to create/add BaseGuia: {insert_err}")
                                 raise insert_err
@@ -505,6 +523,8 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
                             ).first()
                             if existing_g:
                                 existing_g.valida_prestador = g_status
+                                # Guia vista na validação de hoje: renova ciclo de vida
+                                existing_g.ativo = True
                                 logger.info(f"Robustness Sync: Updated status for Guia {g_num}")
                         except Exception as robust_e:
                             logger.error(f"Robustness Sync failed for {g_num}: {robust_e}")

@@ -2,7 +2,7 @@
 Independent models for Worker
 Mirrors the backend models for tables the Worker needs access to
 """
-from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey, Text, BigInteger
+from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey, Text, BigInteger, Boolean
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -57,8 +57,10 @@ class BaseGuia(Base):
     validade = Column(Date)
     codigo_procedimento = Column(Text)
     qtde_solicitada = Column(Integer)
+    qtde_solicitada_pei = Column(Integer)  # valor-base do PEI congelado na 1ª inserção (trigger)
     sessoes_autorizadas = Column(Integer)
     valida_prestador = Column(JSONB, nullable=True)
+    ativo = Column(Boolean, nullable=False, default=True)  # inativa após 24h sem atualização (cron)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
