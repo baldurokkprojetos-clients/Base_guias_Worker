@@ -1,0 +1,112 @@
+<!DOCTYPE html><html>
+<!-- Fixture REAL (captura do portal sgucard 11/11/2026, trim de scripts)
+     — guia 66363404 / CD_GUIA interno 63342796 de MARIA LUISA ALMEIDA CAMPOS.
+     Base p/ CT-U1..U4 (futuro módulo guia_detail / T1) e referência dos
+     seletores: #CampoValidadeSenha, tr[3]/td[2] (nr), tr[4]/td[4] (autorização),
+     tr[5]/td[2] (senha), jsonConsistencia (hasItemAtivo), MSG_BLOQ_*. -->
+<head>
+<meta http-equiv="content-type" content="text/html; charset=iso-8859-1">
+<title>Autorizador da Unimed Goiânia</title>
+<script>
+	var jsonConsistencia = jQuery.parseJSON('{"cdCmPrestIndicado":0,"dmTpGuiaPai":0,"cdCmPrestPrincipal":"39138","fgParamAbrangRede":false,"dmTpGuia":2,"tpValidCapturaGuia":1,"fgRedeInativaSadtInternado":false,"cdUnimed":64,"cdGuiaPai":0,"cdGuia":63342796,"fgTodasRedes":false,"nrGuia":"66363404","cdPrestPrincipal":2209525,"hasItemAtivo":true}');
+	var jsonPrestadores = jQuery.parseJSON('{"principal":{"cd":2209525,"altoCusto":false,"tabPropria":false,"tpPessoa":"J","cm":39138,"isExterno":false},"lista":[{"cd":2209525,"altoCusto":false,"tabPropria":false,"tpPessoa":"J","cm":39138,"isExterno":false}]}');
+	var MSG_BLOQ_BAIXA_CAPTURA_GUIA_PP_TOTAL = 'Prestador principal não possui itens liberados para execução.';
+	var MSG_BLOQ_BAIXA_CAPTURA_GUIA_PP_PARCIAL = 'Local de Atendimento não liberado para o plano deste beneficiário, devido à restrição do local de atendimento x prestador principal.';
+	var MSG_BLOQ_BAIXA_CAPTURA_GUIA_CE_TOTAL = 'Contratado executante não possui itens liberados para execução.';
+	var MSG_BLOQ_BAIXA_CAPTURA_GUIA_CE_PARCIAL = 'Contratado executante não possui permissão para executar algum Item deste atendimento devido à restrição no seu Local x Rede Parcial do Plano.';
+</script>
+</head>
+<body class="MagnetoPageBODY">
+
+<div id="conteudo">
+
+  <form target="modal" name="detalhe_guia" action="nova.do?ccsForm=detalhe_guia:Edit&sg_rede=nullundefined32&cd_carteira=8000&op=2&op=2&CD_GUIA=63342796&CD_PROFISSIONAL=&CD_GUIA_PAI=&cd_cm_benef=252615&gridExamesDisponiveisOrder=Sorter_DT_SOLICITACAO&gridExamesDisponiveisDir=DESC&cd_depen=69&rows=22&CD_ESPECIALIDADE=&cd_fami=53327&tp_contratacao=5&cd_unimed=64&nr_abrangencia=0&dt_validade=0005&sadt_internado=0&dynaHash=e1ed8787f2a2df5fbbb5c94acd6d0267" method="post">
+    <input type="hidden" name="dynaFormCRC" value="03735c072208f08989bfa41d8895873f">
+    <table class="MagnetoFormTABLERecord" cellspacing="0" cellpadding="3">
+
+      <tr>
+        <td class="MagnetoFieldCaptionTD" nowrap>Beneficiário:</td>
+        <td colspan="3" class="MagnetoDataRecordTD">0064.8000.053327.69-5&nbsp;-&nbsp;MARIA LUISA ALMEIDA CAMPOS</td>
+      </tr>
+
+	  <tr>
+	  	<td class="MagnetoFieldCaptionTD">Unimed Origem:&nbsp;</td>
+	  	<td class="MagnetoDataRecordTD">64 - UNIMED G C DE T MEDICO</td>
+	  </tr>
+
+      <tr>
+        <td class="MagnetoFieldCaptionTD" nowrap>Número da guia:</td>
+        <td class="MagnetoDataRecordTD">66363404</td>
+        <td class="MagnetoFieldCaptionTD" nowrap>Situação:</td>
+        <td class="MagnetoDataRecordTD"><img width="16" height="16" alt="" title="" src="/cmagnet/Themes/Magneto2014/ico16autorizado.gif"></img>&nbsp;<span>Autorizado</span>&nbsp;</td>
+      </tr>
+
+      <tr>
+        <td class="MagnetoFieldCaptionTD" nowrap>Solicitação:</td>
+        <td class="MagnetoDataRecordTD">09/10/2025&nbsp;</td>
+        <td class="MagnetoFieldCaptionTD" nowrap>Data da Autorização:</td>
+        <td class="MagnetoDataRecordTD">09/10/2025&nbsp;</td>
+      </tr>
+
+      <tr>
+        <td class="MagnetoFieldCaptionTD" nowrap>Senha de autorização:</td>
+        <td class="MagnetoDataRecordTD">953231282&nbsp;</td>
+        <td class="MagnetoFieldCaptionTD" nowrap>Validade da senha:</td>
+        <td class="MagnetoDataRecordTD"><span id="CampoValidadeSenha">01/06/2027 </span>&nbsp;</td>
+      </tr>
+
+      <tr>
+        <td class="MagnetoFieldCaptionTD" nowrap>Médico solicitante:</td>
+        <td colspan="3" class="MagnetoDataRecordTD">ROUSSIANE ALVES GAIOSO&nbsp;</td>
+      </tr>
+
+      <tr>
+        <td class="MagnetoFieldCaptionTD" valign="top">Contratado executante *:</td>
+        <td colspan="3" class="MagnetoDataRecordTD">
+			<input type="hidden" name="CD_UNIMED" value="64" id="CD_UNIMED">
+			<select id="CD_PROFISSIONAL" name="CD_PROFISSIONAL" class="MagnetoSelect cdCmPrestador select-medico">
+				<OPTION  VALUE="39138">CLINICA LARISSA MARTINS FERREIRA LTDA</OPTION>
+			</select>
+		</td>
+	  </tr>
+
+      <tr>
+        <td class="MagnetoFooterTD" nowrap align="right" colspan="100%">
+			<input type="hidden" value="0" name="FG_VOLTAR" id="FG_VOLTAR">
+			<input type="hidden" value="252615" name="CD_CM_BENEF" id="CD_CM_BENEF">
+			<input type="hidden" id="CD_GUIA" value="63342796" name="CD_GUIA">
+			<input type="hidden" id="TP_INTERNACAO" name="TP_INTERNACAO" value="3">&nbsp;&nbsp;&nbsp;
+			<input id="button_confirmar" class="MagnetoButton" type="submit" value="Confirmar" name="Button_Update" id="Button_Update" style="">
+			<input class="MagnetoButton" type="submit" value="Voltar" name="Button_Voltar" id="Button_Voltar"></td>
+      </tr>
+
+    </table>
+
+  </form>
+
+  <div class="MagnetoBoxErro" id="label_error" style="display: none">
+    <label>Contratado Executante - este Item não está liberado para sua execução: informe um Executante que possui cadastro ou ligue na Central.</label>
+  </div>
+
+  <div class="MagnetoBoxErro" id="label_errorBloq" style="display: none">
+    <label>Contratado executante não possui itens liberados para execução</label>
+  </div>
+
+  <div class="MagnetoBoxErro" id="label_error_item_inativo" style="display:none">
+	<label>Guia solicitada não possui itens ativos</label>
+  </div>
+
+  <div class="MagnetoBoxErro" id="label_error_redeAtendPrestEspec" style="display: none">
+  	<label id="error_redeAtendPrestEspec"></label>
+  </div>
+
+  <div class="MagnetoBoxErro" id="label_errorGuiaSemSenha" style="display: none">
+	<label>Está guia não possui senha gerada! Favor solicitar o cancelamento da mesma e efetuar uma nova solicitação.</label>
+  </div>
+
+  <div id="contentArea">
+  </div>
+</div>
+
+</body>
+</html>

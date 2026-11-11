@@ -20,6 +20,12 @@ from models import Log
 
 import unicodedata
 
+from guia_rules import (
+    STATUS_GUIA_VENCIDA,
+    classificar_tipo_json,
+    parse_data_brasileira,
+)
+
 
 def normalize_status(text):
     """Normaliza o texto do status 'Situação' do portal para comparação:
@@ -394,15 +400,91 @@ class UnimedScraper:
             try:
                 WebDriverWait(self.driver, 20).until(EC.presence_of_element_located((By.XPATH, '//*[@id="s_NR_GUIA"]')))
             except TimeoutException:
-                 self.log("Timeout waiting for results table. Maybe no guias or connection error.", level="WARNING", job_id=job_id, carteirinha_id=carteirinha_db_id)
-                 # Close popup and return empty
-                 self.driver.close()
-                 self.driver.switch_to.window(self.driver.window_handles[0])
-                 self.log("Retorno guias", job_id=job_id, carteirinha_id=carteirinha_db_id)
-                 return {"valida_prestador": {"tipo_json": None, "guias": None}, "guias_scraped": []}
+                 # T3 (PLANO_CORRECAO_GUIAS_VALIDADE §4): timeout do portal é ERRO
+                 # RETRYÁVEL — nunca "Sem Guias". Capturar diagnóstico da tela
+                 # atual (ex.: tela intermediária de validade p/ prefixo != 0064)
+                 # antes de fechar o popup.
+                 diag_url, diag_body = "", ""
+                 try:
+                     diag_url = self.driver.current_url
+                     diag_body = " ".join((self.driver.find_element(By.TAG_NAME, "body").text or "").split())[:300]
+                 except Exception:
+                     pass
+                 self.log(f"Timeout waiting for results table. url={diag_url} body~'{diag_body}'", level="ERROR", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                 # Close popup and return error (dispatcher marca job=error e o
+                 # retry automático attempts<3 reprocessa). Driver pode estar
+                 # morto — o erro amigável deve vencer sobre o WebDriverError.
+                 try:
+                     self.driver.close()
+                     self.driver.switch_to.window(self.driver.window_handles[0])
+                 except Exception:
+                     pass
+                 return {"status": "error", "message": "Timeout carregando tabela de guias no portal (popup não respondeu em 20s)"}
 
-            collected_data = [] 
+            collected_data = []
             valida_guias = {}
+
+            # ── T2 (R1 — dois marcos): estado p/ truth table do tipo_json ──
+            # Elegíveis continuam em valida_guias (semântica legada); guias
+            # apenas-exibição (Vencidas) vão para guias_exibicao e NÃO entram
+            # em collected_data (nada de UPSERT/base/PEI).
+            guias_exibicao = {}
+            flags_lote = {"fora_janela": False, "negadas": 0, "vencidas": 0}
+
+            def _registrar_antiga(row_xpath, date_text):
+                """T2: linha que estourou a janela 270d — registra apenas-exibição
+                (nr/datas/código vêm da própria listagem; SEM fetch do detalhe)."""
+                numero, codigo, descricao = "", "", ""
+                try:
+                    numero = self.driver.find_element(By.XPATH, f'{row_xpath}/td[4]/a').text.strip()
+                except Exception:
+                    pass
+                try:
+                    input_hidden = self.driver.find_element(By.XPATH, f'{row_xpath}//input[@name="HTML_HINT_ITEM"]')
+                    soup_hint = BeautifulSoup(html.unescape(input_hidden.get_attribute("value")), "html.parser")
+                    cd = soup_hint.find("td", class_="hint-td-cd-item")
+                    ds = soup_hint.find("td", class_="hint-td-ds-item")
+                    codigo = cd.get_text(strip=True) if cd else ""
+                    descricao = ds.get_text(strip=True).lstrip("- ").strip() if ds else ""
+                except Exception:
+                    pass
+                chave = numero or ""
+                if chave:
+                    guias_exibicao[chave] = {
+                        "codigo_procedimento": codigo,
+                        "descricao_procedimento": descricao,
+                        "Vinculo_prestador": "Antiga (270d)",
+                        "status_guia": "Antiga270",
+                        "data_solicitacao": date_text,
+                    }
+                    self.log(
+                        f"Guia {chave} solic={date_text} acao=antiga270 origem=listagem "
+                        f"(fora da janela de autorização — exibição apenas)",
+                        job_id=job_id, carteirinha_id=carteirinha_db_id
+                    )
+
+            def _resultado_final():
+                """Fonte única do payload final (DRY) — usado nos 3 retornos:
+                fim natural, corte 270d (Em Estudo e Autorizado)."""
+                tipo = classificar_tipo_json(
+                    valida_guias,
+                    fora_janela=flags_lote["fora_janela"],
+                    algum_negado=flags_lote["negadas"] > 0,
+                    alguma_vencida=flags_lote["vencidas"] > 0,
+                )
+                # Vencidas entram só no frame do job (exibição), nunca na base
+                guias_out = dict(valida_guias)
+                guias_out.update(guias_exibicao)
+                self.log(
+                    f"Resultado guias: tipo={tipo} elegiveis={len(valida_guias)} "
+                    f"vencidas={flags_lote['vencidas']} fora_janela={flags_lote['fora_janela']} "
+                    f"negadas={flags_lote['negadas']} coletadas={len(collected_data)}",
+                    job_id=job_id, carteirinha_id=carteirinha_db_id,
+                )
+                return {
+                    "valida_prestador": {"tipo_json": tipo, "guias": guias_out},
+                    "guias_scraped": collected_data,
+                }
             
             # Helper to check element presence
             def is_element_present(by, value):
@@ -485,21 +567,15 @@ class UnimedScraper:
 
                                 cutoff_date = datetime.datetime.now().date() - datetime.timedelta(days=270)
                                 if guia_date < cutoff_date:
+                                    # T2: fora da janela (marco (a)) — para a varredura
+                                    # (ordenação DESC) e classifica p/ exibição
+                                    flags_lote["fora_janela"] = True
                                     self.log(f"Guia date {date_text} is older than limit. Stopping.", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                    _registrar_antiga(row_xpath, date_text)
                                     self.driver.close()
                                     self.driver.switch_to.window(self.driver.window_handles[0])
-                                    if not valida_guias:
-                                        tipo_json = None
-                                        valida_guias_out = {}
-                                    else:
-                                        tipo_json = "All Sucess"
-                                        if any(val.get("Vinculo_prestador") != "Guia Válida" for val in valida_guias.values()):
-                                            tipo_json = "Thered"
-                                        valida_guias_out = valida_guias
-                                    return {
-                                        "valida_prestador": {"tipo_json": tipo_json, "guias": valida_guias_out},
-                                        "guias_scraped": collected_data
-                                    }
+                                    self.log("Retorno guias", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                    return _resultado_final()
 
                                 # Código/descrição vêm do hint da própria linha
                                 # (disponível sem abrir o detalhe)
@@ -603,6 +679,8 @@ class UnimedScraper:
                                 # Demais statuses: ignorados como antes, mas agora
                                 # com log — diagnóstico imediato do que o portal exibiu
                                 # (ex.: status novo não tratado).
+                                if row_status_norm == "negado":
+                                    flags_lote["negadas"] += 1
                                 self.log(f"Row {idx} com status '{row_status or '(vazio)'}' ignorado.", job_id=job_id, carteirinha_id=carteirinha_db_id)
                                 continue
 
@@ -615,30 +693,22 @@ class UnimedScraper:
                                 except:
                                     guia_date = datetime.datetime.now().date()
                                 
-                                # Date Filter (Old guides)
+                                # Date Filter (Old guides) — marco (a) da R1:
+                                # crivo 270d MANTIDO (PEI bloqueável pela Unimed
+                                # mesmo com guia vigente). DECISÃO-PO 11/11.
                                 cutoff_date = datetime.datetime.now().date() - datetime.timedelta(days=270) # Using 270 as in original
                                 if guia_date < cutoff_date:
+                                    # T2: fora da janela — para a varredura (a
+                                    # tabela está ordenada DESC por solicitação)
+                                    # e classifica o lote p/ exibição "Antigas".
+                                    flags_lote["fora_janela"] = True
                                     self.log(f"Guia date {date_text} is older than limit. Stopping.", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                    _registrar_antiga(row_xpath, date_text)
                                     # Close popup and return what we have
                                     self.driver.close()
                                     self.driver.switch_to.window(self.driver.window_handles[0])
-                                    
-                                    tipo_json = "All Sucess"
-                                    if any(val.get("Vinculo_prestador") != "Guia Válida" for val in valida_guias.values()):
-                                        tipo_json = "Thered"
-                                    
-                                    if not valida_guias:
-                                        tipo_json = None
-                                        valida_guias_out = {}
-                                    else:
-                                        tipo_json = "All Sucess"
-                                        if any(val.get("Vinculo_prestador") != "Guia Válida" for val in valida_guias.values()):
-                                            tipo_json = "Thered"
-                                        valida_guias_out = valida_guias
-                                    return {
-                                        "valida_prestador": {"tipo_json": tipo_json, "guias": valida_guias_out},
-                                        "guias_scraped": collected_data
-                                    }
+                                    self.log("Retorno guias", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                    return _resultado_final()
 
                                 # Click to details
                                 link_element = self.driver.find_element(By.XPATH, f'{row_xpath}/td[4]/a')
@@ -773,6 +843,37 @@ class UnimedScraper:
                                         data_valid = self.driver.find_element(By.XPATH, '//*[@id="CampoValidadeSenha"]').text
                                         cod_terapia, qtde_solic, qtde_aut = self._read_terapia_fields()
 
+                                        # ── T2: marco (b) da R1 — validade ≥ hoje ──
+                                        # Dentro da janela 270d (marco (a) já
+                                        # verificado), guia com validade expirada
+                                        # NÃO entra na base/PEI: só exibição
+                                        # ("Vencida") no frame do job.
+                                        validade_dt = parse_data_brasileira(data_valid)
+                                        numero_chave = (guide_numero or new_num_guia or "").strip()
+                                        if validade_dt is not None and validade_dt < datetime.datetime.now().date():
+                                            flags_lote["vencidas"] += 1
+                                            self.log(
+                                                f"Guia {numero_chave or '(sem nr)'} validade={data_valid.strip()} < hoje — "
+                                                f"acao=vencida origem=clique (não coletada; exibição apenas)",
+                                                job_id=job_id, carteirinha_id=carteirinha_db_id
+                                            )
+                                            if numero_chave:
+                                                guias_exibicao[numero_chave] = {
+                                                    "codigo_procedimento": guide_codigo or cod_terapia,
+                                                    "descricao_procedimento": guide_descricao,
+                                                    "Vinculo_prestador": STATUS_GUIA_VENCIDA,
+                                                    "status_guia": STATUS_GUIA_VENCIDA,
+                                                    "validade": data_valid.strip(),
+                                                }
+                                            # Voltar para a listagem (mesma
+                                            # navegação do caminho normal)
+                                            try:
+                                                self.driver.find_element(By.XPATH, '//*[@id="Button_Voltar"]').click()
+                                                time.sleep(1)
+                                            except Exception:
+                                                self.driver.back()
+                                            continue
+
                                         if not cod_terapia:
                                             # Tabela de terapias ausente/vazia: guia sem itens
                                             # liberados ao prestador. Registrar como bloqueada —
@@ -822,7 +923,11 @@ class UnimedScraper:
                                             "descricao_procedimento": guide_descricao,
                                             "Vinculo_prestador": "Guia Válida"
                                         }
-                                        self.log(f"Scraped Guia {new_num_guia}", job_id=job_id, carteirinha_id=carteirinha_db_id)
+                                        self.log(
+                                            f"Guia {numero_chave} solic={(data_auth or '').strip()} validade={(data_valid or '').strip()} "
+                                            f"acao=coletada origem=clique",
+                                            job_id=job_id, carteirinha_id=carteirinha_db_id
+                                        )
                                         
                                         # Go Back
                                         self.driver.find_element(By.XPATH, '//*[@id="Button_Voltar"]').click()
@@ -895,24 +1000,9 @@ class UnimedScraper:
             except Exception:
                 self.log("Popup já fechada ou driver indisponível.", level="WARNING", job_id=job_id, carteirinha_id=carteirinha_db_id)
             
-            tipo_json = "All Sucess"
-            if any(val.get("Vinculo_prestador") != "Guia Válida" for val in valida_guias.values()):
-                tipo_json = "Thered"
-            
             # Using dict mapping instead of array to map to arbitrary valid JSON struct
             self.log("Retorno guias", job_id=job_id, carteirinha_id=carteirinha_db_id)
-            if not valida_guias:
-                tipo_json = None
-                valida_guias_out = {}
-            else:
-                tipo_json = "All Sucess"
-                if any(val.get("Vinculo_prestador") != "Guia Válida" for val in valida_guias.values()):
-                    tipo_json = "Thered"
-                valida_guias_out = valida_guias
-            return {
-                "valida_prestador": {"tipo_json": tipo_json, "guias": valida_guias_out},
-                "guias_scraped": collected_data
-            }
+            return _resultado_final()
 
         except Exception as e:
             self.log(f"Error processing carteirinha: {e}", level="ERROR", job_id=job_id, carteirinha_id=carteirinha_db_id)

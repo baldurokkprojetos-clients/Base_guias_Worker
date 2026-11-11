@@ -303,6 +303,17 @@ def _process_job_unimed(job: JobRequest):
                 carteirinha_db_id=job.carteirinha_id,
             )
             last_activity_time = datetime.now()
+
+            # T3 (PLANO_CORRECAO_GUIAS_VALIDADE §4): o scraper sinaliza falha
+            # retryável (ex.: timeout do portal) com {"status": "error"} no
+            # payload — propagar para o dispatcher marcar job=error e o retry
+            # automático (attempts<3) reprocessar. Nunca "success" com null.
+            if isinstance(results, dict) and results.get("status") == "error":
+                msg = results.get("message", "Falha no scraping Unimed")
+                _log_error(job.job_id, job.carteirinha_id, f"Scraper Error: {msg}")
+                print(f">>> Job {job.job_id}: scraper retornou erro retryável: {msg}")
+                return {"status": "error", "message": msg, "carteirinha_id": job.carteirinha_id}
+
             print(f">>> Retornando {len(results)} itens para Job {job.job_id}")
 
         return {"status": "success", "data": results, "carteirinha_id": job.carteirinha_id}
