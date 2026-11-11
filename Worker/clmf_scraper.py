@@ -1,9 +1,10 @@
 """
 CLMFScraper — Web scraper para o portal da Clínica Larissa Martins Ferreira.
-Portal: https://abalarissamartinsferreira.com.br
+Portal: https://abalarissamartinsferreira.com.br (login: https://app.abalarissamartinsferreira.com.br/)
 
 Operações:
-  OP0 — Login (com reúso de sessão)
+  OP0 — Login na API do painel novo (app.) + SSO para o sistema antigo,
+        com reúso de sessão (sonda HTTP; sem login visual)
   OP1 — Gravar Relatório Clínico Mensal (RC) e baixar PDF
   OP2 — ImprimirEvolucao: concilia horários do job com atendimentos do portal
         (aba_atividade_single, fallback evolution_single), grava data/horas via
@@ -20,14 +21,13 @@ import logging
 import requests
 from datetime import datetime
 from html import unescape
-from urllib.parse import quote, urlencode, urljoin
+from urllib.parse import quote, urlencode, urljoin, urlparse
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 import psutil
@@ -36,18 +36,26 @@ import urllib3
 logger = logging.getLogger(__name__)
 
 # ─── Constantes de URL ───────────────────────────────────────────────────────
-BASE_URL = "https://abalarissamartinsferreira.com.br"
-LOGIN_URL = f"{BASE_URL}/"
+BASE_URL = "https://abalarissamartinsferreira.com.br"   # sistema antigo (PHP)
+# Painel novo: o login visual antigo (user_email/user_password) foi aposentado
+# pelo painel em app. — a autenticação é feita na API do painel (Bearer) e a
+# sessão do sistema antigo nasce da troca de um token SSO de uso único
+# (mesmo fluxo do botão "irParaOAntigo" do painel: js/app.js).
+APP_URL = "https://app.abalarissamartinsferreira.com.br"
+API_LOGIN_URL = f"{APP_URL}/api/auth/login"       # POST {email, senha} → {token, usuario}
+API_SSO_EMITIR_URL = f"{APP_URL}/api/sso/emitir"  # POST {destino} + Bearer → {url, token}
+# Tela do sistema antigo pós-SSO: precisa ser uma tela presente no MENU da
+# conta (a API valida contra ele — "Tela não encontrada no seu menu.").
+# Módulo de prontuários, o mesmo que OP1/OP2 navegam. Ajustável por env para
+# contas com permissões diferentes.
+SSO_DESTINO = os.getenv("CLMF_SSO_DESTINO", "/prontuarios/home/status/1")
 AJAX_RC_URL = f"{BASE_URL}/_ajax/RelatorioMensalIpasgo.ajax.php"
 PRONTUARIO_URL = f"{BASE_URL}/prontuarios/prontuario/{{id_paciente}}"
 PDF_URL_TEMPLATE = f"{BASE_URL}/uploads/PDFs/RC-{{carteirinha}}-{{nome_paciente}}-{{AbrevEsp}}.pdf"
 
-# Seletor que indica login bem-sucedido
-LOGIN_READY_TITLE = 'Ver CLIENTES'
-LOGIN_READY_SELECTOR = (By.XPATH, f'//*[@title="{LOGIN_READY_TITLE}"]')
-
 # Tempo máximo de espera (segundos)
 WAIT_TIMEOUT = 30
+LOGIN_PROBE_TIMEOUT = 10  # sonda GET / sem seguir redirect (is_logged_in)
 
 # ─── Constantes OP2: ImprimirEvolucao (rotina clmf_imprimir_evolucao) ────────
 ANSWERS_TREATMENT_URL_TEMPLATE = f"{BASE_URL}/reports/answers_treatment/{{id_paciente}}"
@@ -92,8 +100,9 @@ USER_AGENT_EVOLUCAO = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
-# Sessão expirada: portal devolve o form de login
-RE_LOGIN_FORM = re.compile(r'name=["\']user_email["\']', re.I)
+# Sessão expirada: portal devolve o form de login (novo id emailAba, com
+# fallback para o antigo name user_email)
+RE_LOGIN_FORM = re.compile(r'(?:name=["\']user_email["\']|id=["\']emailAba["\'])', re.I)
 RE_SELECT_NAMED = re.compile(
     r'<select[^>]*name=["\'](profissional_id|profissao_id)["\'][^>]*>(.*?)</select>', re.I | re.S
 )
@@ -355,64 +364,139 @@ class CLMFScraper:
                 or "WinError 10061" in msg
                 or "Connection refused" in msg)
 
-    # ─── OP0: Login ─────────────────────────────────────────────────────────
+    # ─── OP0: Login (API do painel + SSO para o sistema antigo) ─────────────
 
     def is_logged_in(self) -> bool:
-        """Verifica se a sessão atual ainda está autenticada."""
-        if not self.driver:
+        """Verifica se a sessão do sistema antigo ainda está autenticada.
+
+        Sonda HTTP em BASE_URL sem seguir redirect: sessão expirada devolve
+        302 para o login do painel (app.). Não depende do driver.
+        """
+        if not self._session_cookies:
             return False
         try:
-            wait = WebDriverWait(self.driver, 3)
-            wait.until(EC.presence_of_element_located(LOGIN_READY_SELECTOR))
-            return True
-        except TimeoutException:
+            resp = requests.get(
+                f"{BASE_URL}/", cookies=self._session_cookies,
+                allow_redirects=False, timeout=LOGIN_PROBE_TIMEOUT,
+                headers={"User-Agent": USER_AGENT_EVOLUCAO},
+            )
+            if resp.is_redirect:
+                destino = resp.headers.get("Location", "")
+                if destino.startswith(APP_URL):
+                    return False
+            return resp.status_code == 200
+        except requests.RequestException:
             return False
 
     def login(self) -> bool:
         """
         OP0 — Autentica no portal CLMF.
+
+        Fluxo (idem ao painel ao abrir uma tela do sistema antigo):
+          1. POST api/auth/login no painel (app.) → token Bearer;
+          2. POST api/sso/emitir → token SSO de uso único + url do antigo;
+          3. POST do token na url → sistema antigo cria a sessão (PHPSESSID).
+
         Retorna True em caso de sucesso, False caso contrário.
-        Reutiliza sessão se o elemento de confirmação já estiver visível.
+        Reutiliza sessão se a sonda indicar que ainda está autenticada.
         """
         if self.is_logged_in():
             logger.info("CLMFScraper: sessão reutilizada — login desnecessário.")
             return True
 
-        logger.info("CLMFScraper: iniciando OP0 — Login.")
+        logger.info("CLMFScraper: iniciando OP0 — Login (API do painel + SSO).")
         try:
-            self.driver.get(LOGIN_URL)
-            wait = WebDriverWait(self.driver, WAIT_TIMEOUT)
+            sessao = requests.Session()
+            sessao.headers.update({"User-Agent": USER_AGENT_EVOLUCAO})
 
-            # Preencher e-mail
-            email_field = wait.until(EC.presence_of_element_located((By.NAME, "user_email")))
-            email_field.clear()
-            email_field.send_keys(self.login_user)
+            # 1) Autenticar no painel novo → token Bearer
+            resp = sessao.post(
+                API_LOGIN_URL,
+                json={"email": self.login_user, "senha": self.senha},
+                timeout=AJAX_TIMEOUT,
+            )
+            if resp.status_code == 401:
+                logger.error(f"CLMFScraper: OP0 — Credenciais recusadas: {resp.text[:200]}")
+                return False
+            if resp.status_code != 200:
+                logger.error(f"CLMFScraper: OP0 — auth/login HTTP {resp.status_code}: {resp.text[:300]}")
+                return False
+            token = (resp.json() or {}).get("token")
+            if not token:
+                logger.error(f"CLMFScraper: OP0 — Resposta sem token: {resp.text[:200]}")
+                return False
 
-            # Preencher senha
-            password_field = self.driver.find_element(By.NAME, "user_password")
-            password_field.clear()
-            password_field.send_keys(self.senha)
+            # 2) Emitir token SSO de uso único para o sistema antigo
+            resp = sessao.post(
+                API_SSO_EMITIR_URL, json={"destino": SSO_DESTINO},
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=AJAX_TIMEOUT,
+            )
+            if resp.status_code == 422:
+                logger.error(
+                    f"CLMFScraper: OP0 — sso/emitir recusou o destino "
+                    f"'{SSO_DESTINO}' (422): {resp.text[:300]} — ajuste a env "
+                    f"CLMF_SSO_DESTINO com uma tela real do sistema antigo."
+                )
+                return False
+            if resp.status_code != 200:
+                logger.error(f"CLMFScraper: OP0 — sso/emitir HTTP {resp.status_code}: {resp.text[:300]}")
+                return False
+            sso = resp.json() or {}
+            if not sso.get("url") or not sso.get("token"):
+                logger.error(f"CLMFScraper: OP0 — SSO sem url/token: {resp.text[:200]}")
+                return False
 
-            # Clicar em Entrar
-            self.driver.find_element(By.XPATH, "/html/body/div[1]/div/form/button").click()
+            # 3) Trocar o token por sessão PHP no sistema antigo (form POST,
+            #    como o painel faz — js/app.js irParaOAntigo)
+            sso_url = urljoin(APP_URL + "/", str(sso["url"]))
+            resp = sessao.post(sso_url, data={"token": sso["token"]}, timeout=AJAX_TIMEOUT)
+            if resp.status_code != 200:
+                logger.error(f"CLMFScraper: OP0 — SSO no sistema antigo HTTP {resp.status_code}: {resp.text[:300]}")
+                return False
 
-            # Aguardar elemento de confirmação de login
-            wait.until(EC.presence_of_element_located(LOGIN_READY_SELECTOR))
-
-            # Capturar cookies de sessão para reúso em requisições HTTP diretas
+            # Cookies de sessão do sistema antigo (PHPSESSID/userView) para
+            # reúso nas requisições HTTP diretas. Só os do domínio antigo:
+            # o painel pode fixar cookies próprios com nomes iguais.
+            dominio_antigo = urlparse(BASE_URL).hostname
             self._session_cookies = {
-                c["name"]: c["value"] for c in self.driver.get_cookies()
+                c.name: c.value for c in sessao.cookies
+                if (c.domain or "").lstrip(".") == dominio_antigo
             }
+            if "PHPSESSID" not in self._session_cookies:
+                logger.warning(
+                    f"CLMFScraper: OP0 — SSO concluído sem PHPSESSID "
+                    f"(cookies: {list(self._session_cookies)})."
+                )
 
-            logger.info("CLMFScraper: OP0 — Login realizado com sucesso.")
+            self._evolucao_sessao = None  # reconstrói com os cookies novos
+            self._injetar_cookies_driver()
+
+            logger.info("CLMFScraper: OP0 — Login realizado com sucesso (API + SSO).")
             return True
 
-        except TimeoutException:
-            logger.error("CLMFScraper: OP0 — Timeout durante login. Verifique credenciais.")
+        except requests.RequestException as e:
+            logger.error(f"CLMFScraper: OP0 — Erro de rede no login: {e}")
             return False
         except Exception as e:
             logger.error(f"CLMFScraper: OP0 — Erro inesperado: {e}")
             return False
+
+    def _injetar_cookies_driver(self):
+        """Replica os cookies da sessão HTTP no Chrome via CDP (OP1 navega no
+        driver; OP2 é HTTP puro e não depende disso)."""
+        if not self.driver or not self._session_cookies:
+            return
+        try:
+            dominio_antigo = urlparse(BASE_URL).hostname
+            for name, value in self._session_cookies.items():
+                self.driver.execute_cdp_cmd("Network.setCookie", {
+                    "name": name, "value": str(value),
+                    "domain": dominio_antigo, "path": "/",
+                })
+            logger.info("CLMFScraper: cookies de sessão injetados no driver.")
+        except Exception as e:
+            logger.warning(f"CLMFScraper: falha ao injetar cookies no driver: {e}")
 
     # ─── OP1: Atualizar RC ──────────────────────────────────────────────────
 
@@ -463,6 +547,9 @@ class CLMFScraper:
         # PASSO 1 — Navegar ao prontuário do paciente
         prontuario_url = PRONTUARIO_URL.format(id_paciente=id_paciente)
         logger.info(f"  → Navegando para {prontuario_url}")
+        # Garante que o browser carregou a sessão (driver pode ter reiniciado
+        # depois do OP0)
+        self._injetar_cookies_driver()
         self.driver.get(prontuario_url)
 
         wait = WebDriverWait(self.driver, WAIT_TIMEOUT)

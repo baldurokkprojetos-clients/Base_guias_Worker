@@ -16,6 +16,7 @@ convenio:
   nome: "CLMF"
   descricao: "Clínica Larissa Martins Ferreira — Portal próprio"
   url_portal: "https://abalarissamartinsferreira.com.br"
+  url_painel: "https://app.abalarissamartinsferreira.com.br"  # login novo (API + SSO)
   tipo_job: "clmf_atualizar_rc"   # campo rotina/job_type — diferencia do job Unimed
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -32,37 +33,39 @@ credenciais:
 # ─────────────────────────────────────────────────────────────────────────────
 operacoes:
 
-  # ── OP0: LOGIN ────────────────────────────────────────────────────────────
+  # ── OP0: LOGIN (API do painel novo + SSO para o sistema antigo) ──────────
+  # O login visual antigo (user_email/user_password/Ver CLIENTES) foi
+  # aposentado pelo painel em app. — o domínio antigo agora redireciona
+  # (302) para lá quando não autenticado.
   - id: OP0_Login
-    descricao: "Autenticação no portal CLMF"
+    descricao: "Autenticação na API do painel + SSO para o sistema antigo"
     params_entrada:
       - login
       - senha
     fluxo:
-      - acao: navigate
-        url: "https://abalarissamartinsferreira.com.br/"
-      - acao: fill
-        selector: 'name="user_email"'
-        valor: "{login}"
-        metodo: clear_then_sendkeys
-      - acao: fill
-        selector: 'name="user_password"'
-        valor: "{senha}"
-        metodo: clear_then_sendkeys
-      - acao: click
-        selector: 'xpath=/html/body/div[1]/div/form/button'
-      - acao: wait_for_element
-        selector: 'title="Ver CLIENTES"'
-        descricao: "Aguarda elemento de clientes — sinal que login foi concluído"
+      - acao: http_post_json
+        url: "https://app.abalarissamartinsferreira.com.br/api/auth/login"
+        corpo: {email: "{login}", senha: "{senha}"}
+        descricao: "Autentica no painel — devolve token Bearer (401 = credenciais recusadas)"
+      - acao: http_post_json
+        url: "https://app.abalarissamartinsferreira.com.br/api/sso/emitir"
+        corpo: {destino: "/prontuarios/home/status/1"}   # tela do MENU da conta (a API valida); env CLMF_SSO_DESTINO sobrepõe
+        headers: {Authorization: "Bearer {token}"}
+        descricao: "Emite token SSO de uso único + url do sistema antigo (idem irParaOAntigo do painel)"
+      - acao: http_post_form
+        url: "{sso.url}"
+        campos: {token: "{sso.token}"}
+        descricao: "Troca o token por sessão PHP no sistema antigo"
       - acao: capture_session
-        descricao: "Captura cookies e sessão após login para reúso em OPs seguintes"
+        descricao: "Captura cookies do domínio antigo (PHPSESSID/userView) para reúso em OPs seguintes; injeta no Chrome via CDP"
 
     logica:
       reuso_sessao: true
       descricao: >
-        Antes de cada job, verificar se a sessão ainda está ativa.
-        Se elemento title="Ver CLIENTES" estiver visível, pular login.
-        Caso contrário, re-autenticar.
+        Antes de cada job, sondar o sistema antigo (GET / sem seguir
+        redirect): 302 para app. = sessão expirada → re-autenticar via
+        API + SSO. Sem Selenium no login — o driver só recebe os cookies
+        (CDP) para a navegação do OP1.
 
   # ── OP1: ATUALIZAR RELATÓRIO CLÍNICO (RC) ────────────────────────────────
   - id: OP1_AtualizarRC
