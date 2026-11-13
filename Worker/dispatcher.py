@@ -516,11 +516,14 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
                 guias_map = valida_payload.get("guias")
                 if isinstance(guias_map, dict):
                     for g_num, g_status in guias_map.items():
-                        # T2 (R1 marco (b)): guias "Vencida" são apenas exibição —
-                        # não renovam ciclo de vida (ativo) nem regravam status
-                        # na base; o cron 24h as inativa naturalmente.
-                        if isinstance(g_status, dict) and g_status.get("status_guia") == "Vencida":
-                            logger.info(f"Robustness Sync: Guia {g_num} vencida — renovação ignorada")
+                        # T2 (R1): entradas apenas-exibição — "Vencida" (marco
+                        # (b)) e "Antiga270" (marco (a)) — não renovam ciclo de
+                        # vida (ativo), não regravam valida_prestador nem
+                        # updated_at (onupdate) na base; o cron 24h as inativa
+                        # naturalmente. Pós-lote 11/11: sem o skip de Antiga270
+                        # a robustness renovava 1 guia/paciente toda noite.
+                        if isinstance(g_status, dict) and g_status.get("status_guia") in ("Vencida", "Antiga270"):
+                            logger.info(f"Robustness Sync: Guia {g_num} apenas-exibição ({g_status.get('status_guia')}) — renovação ignorada")
                             continue
                         try:
                             existing_g = thread_db.query(BaseGuia).filter(
