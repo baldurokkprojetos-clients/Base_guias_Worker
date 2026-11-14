@@ -266,3 +266,32 @@ travam a semântica.
   `worker/classifica_sem_guias.py`, `worker/analise_historico.py`, `worker/analise_timeouts.py`.
 - HTMLs de referência do portal (listagem + detalhe 63342796/66363404): anexos desta task —
   versionar como fixtures em `worker/tests/fixtures/`.
+
+## Apêndice B — Pós-lote (11-12/11) e desdobramentos (14/11)
+
+**Validação do gate QA**: reclassificação perfeita dos 102 casos (90 Antigas270 · 4 Sem Guias
+real · 3 Negadas · 2 viraram Válidas/Bloqueadas · 3 error/timeout). Zero "Sem Guias"
+enganoso. Fix pós-lote: robustness sync não renova guias apenas-exibição (`373eb88`).
+
+**Timeouts — causa raiz confirmada pelo diagnóstico do T3**: modal do portal
+`modal/mensagens/index.do?msg=Beneficiário local não pode ser cadastrado como beneficiário de
+intercâmbio` — o portal recusa carteirinhas de **intercâmbio** (não-0064) no fluxo novo exame.
+> **Decisão PO (14/11)**: para carteirinhas com prefixo != 0064 o fluxo muda com frequência;
+> o usuário fornecerá o fluxo manual para correção futura (task nova quando vier). Enquanto
+> isso os casos ficam em `error` retryável e aparecem no painel de Insights (seção Portal).
+
+**Guias com qtde=0 — diagnóstico fechado**: as 490 ativas com 0 são todas bloqueadas por
+design (483 "Prestador principal...", 5 rede, 2 Antigas270); **zero** casos 'Guia Válida' com
+0 e zero assinatura de bug de parsing (aut=0 com solic>0). Guia 76788780 (Enzo Gabriel):
+bloqueada por design (`Prestador principal não possui itens liberados`).
+
+**PEIs "duplicados" do Enzo**: eram **multi-carteirinhas** (trigger com UNIQUE por
+carteirinha está correto). Mantido PEI por carteirinha; afunilamento por id_paciente é
+futuro. Painel de Insights lista os 10 pacientes multi-carteirinhas para inativação manual.
+
+**Migrations aplicadas**: 0038 (guard codigo NULL/vazio no calculate_patient_pei + NULLIF no
+freeze + backfills defensivos) e 0039 (tabela insight_acoes) — aplicadas em produção 14/11.
+
+**Novo**: painel de Inteligência (`GET /insights/resumo`) no modal de Importações — cards do
+lote, lista de renovação de guia com mensagem pronta, carteirinhas duplicadas, anomalias
+qtde=0, erros do portal e bloqueios agregados (backend/routes/insights.py + migration 0039).

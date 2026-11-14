@@ -393,11 +393,31 @@ def run_dispatcher(server_urls_str=None, stagger=15, log_queue=None, cmd_queue=N
                             qtd_solic_val = int(item.get("qtde_solicitada"))
                         except:
                             qtd_solic_val = 0
-                            
+
                         try:
                             qtd_aut_val = int(item.get("qtde_autorizada"))
                         except:
                             qtd_aut_val = 0
+
+                        # Decisão PO 14/11: guia Autorizado SEMPRE traz quantidade >0
+                        # no portal — 0 aqui é anomalia (célula vazia/falha de leitura).
+                        # Grava 0 (nunca mascarar com valor anterior) e registra p/ o
+                        # painel de Insights listar essas guias p/ conferência no portal.
+                        # Bloqueadas têm 0 por design (dispatcher insere sem itens).
+                        if not is_blocked and (qtd_solic_val == 0 or qtd_aut_val == 0):
+                            logger.warning(
+                                f"Guia {guia_num} Autorizado com qtde 0 "
+                                f"(sol={item.get('qtde_solicitada')!r} aut={item.get('qtde_autorizada')!r}) — "
+                                f"gravando 0; revisar no portal (Insights: guia_qtde_zero)"
+                            )
+                            try:
+                                thread_db.add(Log(job_id=job_id, carteirinha_id=carteirinha_id, level="WARN",
+                                    message=f"Guia {guia_num} Autorizado com qtde 0 "
+                                            f"(sol={item.get('qtde_solicitada')!r} aut={item.get('qtde_autorizada')!r}) — "
+                                            f"anomalia p/ conferir no portal"))
+                                thread_db.commit()
+                            except Exception:
+                                pass
 
                         data_auth_parsed = parse_date(item.get("data_autorizacao"))
                         validade_parsed = parse_date(item.get("validade_senha"))

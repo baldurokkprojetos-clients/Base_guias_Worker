@@ -206,6 +206,9 @@ class UnimedScraper:
     # do DOM. Imune à posição do div — o XPath absoluto original
     # (/html/body/div[1]/div[13]/...) quebrava quando a página de detalhe
     # renderiza divs extras (ex.: aviso de guia bloqueada ao prestador).
+    # `linha` devolve o texto bruto da célula concatenadas para o log de
+    # diagnóstico quando solic/aut vierem vazias (guia Autorizada SEMPRE
+    # traz quantidade >0 no portal — vazio é anomalia a investigar).
     _TERAPIA_TABLE_JS = """
         var tables = document.querySelectorAll('div > table');
         for (var i = 0; i < tables.length; i++) {
@@ -217,23 +220,44 @@ class UnimedScraper:
             if (cells.length < 6) continue;
             var inp = cells[2].querySelector('input');
             if (!inp) continue;
+            var linha = '';
+            for (var j = 0; j < cells.length; j++) {
+                linha += (cells[j].textContent || '').trim() + ' | ';
+            }
             return {
                 cod: inp.value || '',
                 solic: (cells[4].textContent || '').trim(),
-                aut: (cells[5].textContent || '').trim()
+                aut: (cells[5].textContent || '').trim(),
+                linha: linha
             };
         }
         return null;
     """
 
-    def _read_terapia_fields(self):
+    def _read_terapia_fields(self, guia_ref=None, job_id=None, carteirinha_id=None):
         """Lê (codigo, qtde_solicitada, qtde_autorizada) da tabela de terapias
         da página de detalhe. Retorna (None, None, None) quando a tabela não
-        existe — indício de guia sem itens liberados ao prestador."""
+        existe — indício de guia sem itens liberados ao prestador.
+
+        Diagnóstico (decisão PO 14/11): guia Autorizada sempre traz quantidade
+        >0 — célula vazia é anomalia; gravamos 0 e logamos a leitura bruta
+        para separar bloqueio do prestador de caracter estranho/falha do
+        portal/coluna variante."""
         try:
             data = self.driver.execute_script(self._TERAPIA_TABLE_JS)
             if data:
-                return (data.get("cod") or ""), (data.get("solic") or ""), (data.get("aut") or "")
+                cod = data.get("cod") or ""
+                solic = data.get("solic") or ""
+                aut = data.get("aut") or ""
+                if not solic or not aut:
+                    self.log(
+                        f"Terapias incompletas (guia {guia_ref or 'n/d'}): gravando 0 e seguindo — "
+                        f"linha_bruta='{(data.get('linha') or '').strip()}' cod='{cod}' "
+                        f"qtde_sol='{solic}' qtde_aut='{aut}' "
+                        f"(revisar no portal: bloqueio, coluna variante ou caracter inesperado)",
+                        level="WARNING", job_id=job_id, carteirinha_id=carteirinha_id
+                    )
+                return cod, solic, aut
         except Exception:
             pass
         # Fallback: XPath absoluto original (páginas sem variação de divs)
@@ -243,6 +267,17 @@ class UnimedScraper:
             qtde_aut = self.driver.find_element(By.XPATH, '/html/body/div[1]/div[13]/div/table/tbody/tr[2]/td[6]').text.strip()
             return cod or "", qtde_solic, qtde_aut
         except Exception:
+            n_tabelas = ""
+            try:
+                n_tabelas = self.driver.execute_script(
+                    "return document.querySelectorAll('div > table').length")
+            except Exception:
+                pass
+            self.log(
+                f"Tabela de terapias ausente (guia {guia_ref or 'n/d'}): "
+                f"{n_tabelas} tabelas div>table na página; bloqueio='{self._detect_blocked_message()}'",
+                level="WARNING", job_id=job_id, carteirinha_id=carteirinha_id
+            )
             return None, None, None
 
     def _detect_blocked_message(self):
@@ -630,7 +665,8 @@ class UnimedScraper:
                                         except Exception:
                                             pass
                                         try:
-                                            cod_t, q_s, q_a = self._read_terapia_fields()
+                                            cod_t, q_s, q_a = self._read_terapia_fields(
+                                                guia_ref=guide_numero, job_id=job_id, carteirinha_id=carteirinha_db_id)
                                             if cod_t:
                                                 cod_terapia, qtde_solic, qtde_aut = cod_t, q_s, q_a
                                         except Exception:
@@ -841,7 +877,8 @@ class UnimedScraper:
                                         data_auth = self.driver.find_element(By.XPATH, '//*[@id="conteudo-submenu"]/form/table/tbody/tr[4]/td[4]').text
                                         senha = self.driver.find_element(By.XPATH, '//*[@id="conteudo-submenu"]/form/table/tbody/tr[5]/td[2]').text
                                         data_valid = self.driver.find_element(By.XPATH, '//*[@id="CampoValidadeSenha"]').text
-                                        cod_terapia, qtde_solic, qtde_aut = self._read_terapia_fields()
+                                        cod_terapia, qtde_solic, qtde_aut = self._read_terapia_fields(
+                                            guia_ref=(guide_numero or new_num_guia), job_id=job_id, carteirinha_id=carteirinha_db_id)
 
                                         # ── T2: marco (b) da R1 — validade ≥ hoje ──
                                         # Dentro da janela 270d (marco (a) já
@@ -925,6 +962,7 @@ class UnimedScraper:
                                         }
                                         self.log(
                                             f"Guia {numero_chave} solic={(data_auth or '').strip()} validade={(data_valid or '').strip()} "
+                                            f"qtde_sol={str(qtde_solic).strip() or '0'} qtde_aut={str(qtde_aut).strip() or '0'} "
                                             f"acao=coletada origem=clique",
                                             job_id=job_id, carteirinha_id=carteirinha_db_id
                                         )
