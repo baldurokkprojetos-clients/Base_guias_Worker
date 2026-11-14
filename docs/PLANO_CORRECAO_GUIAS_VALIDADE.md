@@ -182,7 +182,7 @@ mudança no portal.
 - Log-resumo por job: contagens por ação + `tipo_json` final (já parcialmente existe —
   `valida_prestador JSON`).
 - Query de monitoramento (doc apenas): distribuição diária de `tipo_json` dos lotes 23:01 UTC
-  (script de referência já validado na análise — `worker/analise_*.py`).
+  (script de referência já validado na análise — `worker/analise/*.py`).
 
 **AC:** para qualquer job é possível reconstruir a decisão de cada guia a partir dos logs.
 
@@ -262,8 +262,9 @@ travam a semântica.
 - Jobs "sem guias": 102 (91 corte-270d · 4 timeout · 4 vazio · 3 negadas).
 - Pilotos: 186574 MARIA LUISA · 186162 HEITOR MENDES · 186546 ARTHUR LIMA · 186396 NOAH
   FELIPE (vazio) · 186208 ISRAEL · 186211 JOAO ANTONIO (negadas).
-- Scripts de análise reutilizáveis pelo QA: `worker/analise_lote_1011.py`,
-  `worker/classifica_sem_guias.py`, `worker/analise_historico.py`, `worker/analise_timeouts.py`.
+- Scripts de análise reutilizáveis pelo QA: `worker/analise/analise_lote_1011.py`,
+  `worker/analise/classifica_sem_guias.py`, `worker/analise/analise_historico.py`, `worker/analise/analise_timeouts.py`
+  (e `worker/analise/verifica_pos_lote.py`, `worker/analise/diag_pei_qtde.py`).
 - HTMLs de referência do portal (listagem + detalhe 63342796/66363404): anexos desta task —
   versionar como fixtures em `worker/tests/fixtures/`.
 

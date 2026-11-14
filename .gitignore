@@ -16,3 +16,8 @@ __pycache__/
 *.xlsx
 json_example_clmf.json
 page.html
+
+# Saídas locais de scripts de análise (não versionar)
+logs_output.txt
+*_output.txt
+inspect_*.txt
