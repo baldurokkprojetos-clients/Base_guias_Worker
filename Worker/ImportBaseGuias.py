@@ -224,11 +224,18 @@ class UnimedScraper:
             for (var j = 0; j < cells.length; j++) {
                 linha += (cells[j].textContent || '').trim() + ' | ';
             }
+            var cods = [];
+            for (var k = 1; k < rows.length; k++) {
+                var c2 = rows[k].cells[2] ? rows[k].cells[2].querySelector('input') : null;
+                if (c2) cods.push(c2.value || '');
+            }
             return {
                 cod: inp.value || '',
                 solic: (cells[4].textContent || '').trim(),
                 aut: (cells[5].textContent || '').trim(),
-                linha: linha
+                linha: linha,
+                nrows: rows.length - 1,
+                cods: cods.join(' / ')
             };
         }
         return null;
@@ -249,6 +256,18 @@ class UnimedScraper:
                 cod = data.get("cod") or ""
                 solic = data.get("solic") or ""
                 aut = data.get("aut") or ""
+                # 0040: guia multi-item — qtdes vêm da 1ª linha; registrar os
+                # códigos de todas as linhas p/ diagnóstico (o código da guia
+                # usado na base é o HINT da listagem, não estes).
+                try:
+                    if int(data.get("nrows") or 1) > 1:
+                        self.log(
+                            f"Terapias multi-item (guia {guia_ref or 'n/d'}): {data.get('nrows')} linhas, "
+                            f"codigos='{data.get('cods')}' — qtdes lidas da 1ª linha",
+                            level="WARNING", job_id=job_id, carteirinha_id=carteirinha_id
+                        )
+                except (TypeError, ValueError):
+                    pass
                 if not solic or not aut:
                     self.log(
                         f"Terapias incompletas (guia {guia_ref or 'n/d'}): gravando 0 e seguindo — "
@@ -685,7 +704,8 @@ class UnimedScraper:
                                         time.sleep(1)
                                     except: pass
 
-                                codigo_final = (cod_terapia or guide_codigo or "").strip()
+                                # 0040: hint primeiro (autoritativo), terapia fallback
+                                codigo_final = (guide_codigo or cod_terapia or "").strip()
                                 numero_chave = (guide_numero or new_num_guia or "").strip()
                                 if not numero_chave:
                                     continue
@@ -947,7 +967,12 @@ class UnimedScraper:
                                             "data_autorizacao": data_auth,
                                             "senha": senha,
                                             "validade_senha": data_valid,
-                                            "codigo_procedimento": cod_terapia,
+                                            # 0040/caso 76788780: o HINT da listagem é o
+                                            # código autoritativo da guia; a tabela de
+                                            # terapias pode exibir item diverso (ex.:
+                                            # INSUFICIÊNCIA DE REDE) — fica só como
+                                            # fallback e fonte das quantidades.
+                                            "codigo_procedimento": (guide_codigo or cod_terapia),
                                             "descricao_procedimento": guide_descricao,
                                             "qtde_solicitada": qtde_solic,
                                             "qtde_autorizada": qtde_aut,

@@ -296,3 +296,29 @@ freeze + backfills defensivos) e 0039 (tabela insight_acoes) — aplicadas em pr
 **Novo**: painel de Inteligência (`GET /insights/resumo`) no modal de Importações — cards do
 lote, lista de renovação de guia com mensagem pronta, carteirinhas duplicadas, anomalias
 qtde=0, erros do portal e bloqueios agregados (backend/routes/insights.py + migration 0039).
+
+## Apêndice C — PEI fantasma por troca de código da guia (caso 76788780, 17/11)
+
+**Caso âncora (único no banco — relatório `analise/relatorio_fantasmas_pei.py`)**: guia
+76788780 (Enzo Gabriel, 0064.0317.011904.67-8) inserida em 01/11 pelo caminho feliz com o
+código da 1ª linha da tabela de terapias (2250005103, qtde 64) gerou PEI 4.0; ao ser
+bloqueada e re-codificada pelo hint (2250005260 — INSUFICIÊNCIA DE REDE) no job de 04/11, o
+trigger recalculou só o par novo — o par antigo (5103) ficou órfão com PEI ativo/Validado
+para sempre. O "qtde=0" investigado em 14/11 nesta guia era sintoma deste bloqueio+troca,
+não falha de leitura. Logs da época não existem mais (retenção ~2 dias).
+
+**Correções (17/11)**:
+1. **Scraper**: código da guia = HINT da listagem (autoritativo) em todos os caminhos
+   (happy path e Em Estudo agora `guide_codigo or cod_terapia`); tabela de terapias segue
+   só para quantidades e fallback. Diagnóstico novo: WARNING quando a guia tiver múltiplas
+   linhas de terapia (códigos de todas registrados no log).
+2. **Migration 0040**: `recalc_patient_pei_pair()` (fonte única) + trigger recalcula o par
+   ANTIGO em UPDATE com código/carteirinha alterados (órfão inativa ou promove à próxima
+   guia válida do par); backfill recalculou todos os pares — fantasma do Enzo inativado,
+   zero fantasmas globais. Semântica: bloqueio → PEI inativo (sem outra guia válida);
+   renovação/desbloqueio → reativa; troca de código → recalcula os dois pares.
+3. Fixture `tests/fixtures/detalhe_guia_76788780_bloqueada.html` (detalhe bloqueado real).
+
+**Efeito aceito**: guias válidas cujo hint não esteja na tabela `procedimentos` do convênio
+passam a ser ignoradas com log "Procedimento não autorizado" (códigos INSUFICIÊNCIA DE
+REDE podem ser cadastrados lá se o negócio quiser PEI deles).

@@ -1,0 +1,105 @@
+<!DOCTYPE html><html>
+<!-- Fixture REAL (captura do portal sgucard 17/11/2026, trim de scripts) —
+     guia 76788780 / CD_GUIA interno 71028971 de ENZO GABRIEL (0064.0317.011904.67-8).
+     Caso âncora do PEI fantasma (código 5103→5260): detalhe BLOQUEADO ao prestador —
+     contentArea vazio (grid lista_procedimentos não carrega), botões Confirmar
+     ocultos (style display:none), só Voltar visível; jsonConsistencia 71028971
+     com hasItemAtivo=true. Referência p/ CT-U do módulo guia_detail (T1). -->
+<head>
+<meta http-equiv="content-type" content="text/html; charset=iso-8859-1">
+<title>Autorizador da Unimed Goiânia</title>
+<script>
+	var jsonConsistencia = jQuery.parseJSON('{"cdCmPrestIndicado":0,"dmTpGuiaPai":0,"cdCmPrestPrincipal":"39138","fgParamAbrangRede":false,"dmTpGuia":2,"tpValidCapturaGuia":1,"fgRedeInativaSadtInternado":false,"cdUnimed":64,"cdGuiaPai":0,"cdGuia":71028971,"fgTodasRedes":false,"nrGuia":"76788780","cdPrestPrincipal":2209525,"hasItemAtivo":true}');
+	var jsonPrestadores = jQuery.parseJSON('{"principal":{"cd":2209525,"altoCusto":false,"tabPropria":false,"tpPessoa":"J","cm":39138,"isExterno":false},"lista":[{"cd":2209525,"altoCusto":false,"tabPropria":false,"tpPessoa":"J","cm":39138,"isExterno":false}]}');
+	var MSG_BLOQ_BAIXA_CAPTURA_GUIA_PP_TOTAL = 'Prestador principal não possui itens liberados para execução.';
+</script>
+</head>
+<body class="MagnetoPageBODY">
+
+<div id="conteudo">
+
+  <form target="modal" name="detalhe_guia" action="nova.do?ccsForm=detalhe_guia:Edit&sg_rede=nullundefined90&cd_carteira=317&op=2&op=2&CD_GUIA=71028971&CD_PROFISSIONAL=&CD_GUIA_PAI=&cd_cm_benef=750811&gridExamesDisponiveisOrder=Sorter_DT_SOLICITACAO&gridExamesDisponiveisDir=DESC&cd_depen=67&rows=75&CD_ESPECIALIDADE=&cd_fami=11904&tp_contratacao=1&cd_unimed=64&nr_abrangencia=0&cd_guia=&dt_validade=1701&sadt_internado=0&dynaHash=43451148934cbf3ed405bf9d74ff82fa" method="post">
+    <input type="hidden" name="dynaFormCRC" value="c757002061bc27ea4a6f92613b4e5597">
+    <table class="MagnetoFormTABLERecord" cellspacing="0" cellpadding="3">
+
+      <tr>
+        <td class="MagnetoFieldCaptionTD" nowrap>Beneficiário:</td>
+        <td colspan="3" class="MagnetoDataRecordTD">0064.0317.011904.67-8&nbsp;-&nbsp;ENZO GABRIEL OLIVEIRA DE ALMEIDA</td>
+      </tr>
+
+      <tr>
+        <td class="MagnetoFieldCaptionTD">Unimed Origem:&nbsp;</td>
+        <td class="MagnetoDataRecordTD">64 - UNIMED G C DE T MEDICO</td>
+      </tr>
+
+      <tr>
+        <td class="MagnetoFieldCaptionTD" nowrap>Número da guia:</td>
+        <td class="MagnetoDataRecordTD">76788780</td>
+        <td class="MagnetoFieldCaptionTD" nowrap>Situação:</td>
+        <td class="MagnetoDataRecordTD"><img width="16" height="16" alt="" title="" src="/cmagnet/Themes/Magneto2014/ico16autorizado.gif"></img>&nbsp;<span>Autorizado</span>&nbsp;</td>
+      </tr>
+
+      <tr>
+        <td class="MagnetoFieldCaptionTD" nowrap>Solicitação:</td>
+        <td class="MagnetoDataRecordTD">26/10/2026&nbsp;</td>
+        <td class="MagnetoFieldCaptionTD" nowrap>Data da Autorização:</td>
+        <td class="MagnetoDataRecordTD">04/11/2026&nbsp;</td>
+      </tr>
+
+      <tr>
+        <td class="MagnetoFieldCaptionTD" nowrap>Senha de autorização:</td>
+        <td class="MagnetoDataRecordTD">962878442&nbsp;</td>
+        <td class="MagnetoFieldCaptionTD" nowrap>Validade da senha:</td>
+        <td class="MagnetoDataRecordTD"><span id="CampoValidadeSenha">03/01/2027 </span>&nbsp;</td>
+      </tr>
+
+      <tr>
+        <td class="MagnetoFieldCaptionTD" nowrap>Médico solicitante:</td>
+        <td colspan="3" class="MagnetoDataRecordTD">LUANNA SERPA CORREA DIAS FERRO&nbsp;</td>
+      </tr>
+
+      <tr>
+        <td class="MagnetoFieldCaptionTD" valign="top">Contratado executante *:</td>
+        <td colspan="3" class="MagnetoDataRecordTD">
+			<input type="hidden" name="CD_UNIMED" value="64" id="CD_UNIMED">
+			<select id="CD_PROFISSIONAL" name="CD_PROFISSIONAL" class="MagnetoSelect cdCmPrestador select-medico">
+				<OPTION  VALUE="39138">CLINICA LARISSA MARTINS FERREIRA LTDA</OPTION>
+			</select>
+		</td>
+	  </tr>
+
+      <tr>
+        <td class="MagnetoFooterTD" nowrap align="right" colspan="100%">
+			<input type="hidden" value="0" name="FG_VOLTAR" id="FG_VOLTAR">
+			<input type="hidden" value="750811" name="CD_CM_BENEF" id="CD_CM_BENEF">
+			<input type="hidden" id="CD_GUIA" value="71028971" name="CD_GUIA">
+			<input type="hidden" id="TP_INTERNACAO" name="TP_INTERNACAO" value="3">&nbsp;&nbsp;&nbsp;
+			<input class="MagnetoButton" id="button_confirmar_voltar" type="submit" value="Confirmar e Voltar" name="Button_Update_Voltar" style="display: none">
+			<input id="button_confirmar" class="MagnetoButton" type="submit" value="Confirmar" name="Button_Update" id="Button_Update" style="display: none">
+			<input class="MagnetoButton" type="submit" value="Voltar" name="Button_Voltar" id="Button_Voltar"></td>
+      </tr>
+
+    </table>
+	<input id="hdJsonTarja" type="hidden" name="jsonTarja" value="">
+
+  </form>
+
+  <div class="MagnetoBoxLoad" id="ID_LOADING">
+    <img src="../../Themes/Magneto2014/loading_novo.gif"><br>
+    <label>Carregando! Aguarde por favor...</label>
+  </div>
+
+  <div class="MagnetoBoxErro" id="label_error" style="display: none">
+    <label>Contratado Executante - este Item não está liberado para sua execução: informe um Executante que possui cadastro ou ligue na Central.</label>
+  </div>
+
+  <div class="MagnetoBoxErro" id="label_errorBloq" style="display: none">
+    <label>Contratado executante não possui itens liberados para execução</label>
+  </div>
+
+  <div id="contentArea">
+  </div>
+</div>
+
+</body>
+</html>
